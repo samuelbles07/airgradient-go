@@ -3,6 +3,7 @@
 #include "driver/spi_master.h"
 #include "driver/i2c_master.h"
 
+#include "esp_log_level.h"
 #include "esp_timer.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -13,7 +14,9 @@
 #include "soc/gpio_num.h"
 #include "sps30.h"
 #include "gdey0213b74.h"
+
 #include "ui/dashboard_ui.h"
+#include "gps_service.h"
 
 #define MILLIS() ((uint32_t)(esp_timer_get_time() / 1000))
 
@@ -31,6 +34,10 @@
 #define GPIO_EN_PM1 GPIO_NUM_26 // GPIO 26 - PM sensor load switch + I2C isolator enable
 #define GPIO_QON GPIO_NUM_5
 #define GPIO_WDT GPIO_NUM_2
+#define UART_GPS_TX GPIO_NUM_11
+#define UART_GPS_RX GPIO_NUM_12
+#define UART_GPS_PORT UART_NUM_1
+#define UART_GPS_BAUD 9600
 
 static void delay_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
@@ -39,6 +46,7 @@ static const char *TAG = "GO";
 static bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle);
 static void init_qon_button();
 static void resetExtWatchdog();
+static void log_gps_data(const GPSService::Data &d);
 
 sps30_handle_t sps30_handle;
 
@@ -51,6 +59,7 @@ static void IRAM_ATTR gpio_isr_handler(void *arg) {
 
 extern "C" void app_main(void) {
   esp_log_level_set(TAG, ESP_LOG_INFO);
+  esp_log_level_set("GPS", ESP_LOG_DEBUG);
 
   spi_bus_config_t buscfg = {};
   buscfg.mosi_io_num = 25;
@@ -80,6 +89,17 @@ extern "C" void app_main(void) {
 
   init_sps30_sensor(bus_handle);
   init_qon_button();
+
+  // Init GPS
+  GPSService::Config gpsConfig;
+  gpsConfig.uart_num = UART_GPS_PORT;
+  gpsConfig.rx_pin = UART_GPS_RX;
+  gpsConfig.tx_pin = UART_GPS_TX;
+  gpsConfig.baud_rate = UART_GPS_BAUD;
+  gpsConfig.log_raw_nmea = true;
+  GPSService gps;
+  ESP_ERROR_CHECK(gps.init(gpsConfig));
+  ESP_ERROR_CHECK(gps.start());
 
   // Init E-Paper Display
   ssd1680x::Config cfg;
@@ -121,6 +141,8 @@ extern "C" void app_main(void) {
       sps30_read_measurement(sps30_handle, &sps30_result);
       pm25 = sps30_result.pm2p5_mass;
       ESP_LOGI(TAG, "pm25: %.1f", pm25);
+      auto gpsData = gps.get();
+      log_gps_data(gpsData);
     }
 
     // Interval refresh
@@ -240,4 +262,31 @@ void resetExtWatchdog() {
   gpio_set_level(GPIO_WDT, 1);
   vTaskDelay(pdMS_TO_TICKS(20));
   gpio_set_level(GPIO_WDT, 0);
+}
+
+void log_gps_data(const GPSService::Data &d) {
+  char time_buf[32];
+  if (d.utc.date_valid && d.utc.time_valid) {
+    snprintf(time_buf, sizeof(time_buf), "%04d-%02d-%02d %02d:%02d:%02dZ", d.utc.year, d.utc.month,
+             d.utc.day, d.utc.hour, d.utc.min, d.utc.sec);
+  } else if (d.utc.time_valid) {
+    snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02dZ", d.utc.hour, d.utc.min, d.utc.sec);
+  } else {
+    snprintf(time_buf, sizeof(time_buf), "--");
+  }
+  if (d.fix_valid) {
+    ESP_LOGI(TAG,
+             "fix=1 q=%d sats=%d lat=%.6f lon=%.6f alt=%s%.1fm spd=%s%.1fkn trk=%s%.0fdeg time=%s "
+             "ant=%s last_sentence=%" PRIu64 "ms",
+             d.fix_quality, d.satellites, d.latitude_deg, d.longitude_deg,
+             d.altitude_valid ? "" : "~", d.altitude_m, d.speed_valid ? "" : "~", d.speed_knots,
+             d.track_valid ? "" : "~", d.track_deg, time_buf,
+             GPSService::antenna_status_to_str(d.antenna_status), d.last_sentence_ms);
+  } else {
+    ESP_LOGI(TAG,
+             "fix=0 q=%d sats=%d lat=-- lon=-- alt=-- spd=-- trk=-- time=%s ant=%s "
+             "last_sentence=%" PRIu64 "ms",
+             d.fix_quality, d.satellites, time_buf,
+             GPSService::antenna_status_to_str(d.antenna_status), d.last_sentence_ms);
+  }
 }
