@@ -12,7 +12,6 @@
 
 #include "soc/gpio_num.h"
 #include "sps30.h"
-#include "cap1203.h"
 #include "gdey0213b74.h"
 #include "ui/dashboard_ui.h"
 
@@ -31,13 +30,15 @@
 
 #define GPIO_EN_PM1 GPIO_NUM_26 // GPIO 26 - PM sensor load switch + I2C isolator enable
 #define GPIO_QON GPIO_NUM_5
+#define GPIO_WDT GPIO_NUM_2
 
 static void delay_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
-static const char *TAG = "go-display";
+static const char *TAG = "GO";
 
 static bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle);
 static void init_qon_button();
+static void resetExtWatchdog();
 
 sps30_handle_t sps30_handle;
 
@@ -105,8 +106,14 @@ extern "C" void app_main(void) {
   float pm25 = 0.7f;
   uint32_t displayRefreshStart = MILLIS();
   uint32_t lastPmRead = MILLIS();
+  uint32_t lastWdtReset = MILLIS();
   sps30_measurement_t sps30_result;
   while (1) {
+
+    if ((MILLIS() - lastWdtReset) > 60000) {
+      lastWdtReset = MILLIS();
+      resetExtWatchdog();
+    }
 
     // Interval pm
     if ((MILLIS() - lastPmRead) >= 1000) {
@@ -226,4 +233,11 @@ void button_task(void *arg) {
       }
     }
   }
+}
+
+void resetExtWatchdog() {
+  ESP_LOGI(TAG, "Watchdog reset");
+  gpio_set_level(GPIO_WDT, 1);
+  vTaskDelay(pdMS_TO_TICKS(20));
+  gpio_set_level(GPIO_WDT, 0);
 }
