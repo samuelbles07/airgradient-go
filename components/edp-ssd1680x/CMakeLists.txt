@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "src/ssd1680x.cpp"
+        "panels/gdey0213b74.cpp"
+        "panels/gdey0213b74h.cpp"
+    INCLUDE_DIRS
+        "src/include"
+        "panels/include"
+    REQUIRES
+        driver
+        esp_timer
+)
