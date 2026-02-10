@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -18,10 +19,6 @@ extern "C" {
 }
 
 static const char* TAG = "GPS";
-
-#ifndef LOG_LOCAL_LEVEL
-#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
-#endif
 
 static bool contains_token(const char* data, size_t len, const char* token) {
   if (!data || !token) {
@@ -65,10 +62,10 @@ GPSService::~GPSService() {
 }
 
 esp_err_t GPSService::init(const Config& cfg) {
-  esp_log_level_set("GPS", ESP_LOG_DEBUG);
   if (initialized_) {
     return ESP_OK;
   }
+  esp_log_level_set(TAG, ESP_LOG_DEBUG);
 
   if (cfg.rx_pin == GPIO_NUM_NC) {
     ESP_LOGE(TAG, "GPSService init: rx_pin not set");
@@ -328,31 +325,49 @@ void GPSService::update_from_gga_(const void* gga_ptr, uint64_t now_ms) {
   }
 
   const bool fix = (gga->position_fix > 0);
+  const int sats = gga->n_satellites;
+  const bool ok = fix && (sats > 0);
   const double lat = position_to_decimal(&gga->latitude);
   const double lon = position_to_decimal(&gga->longitude);
 
   portENTER_CRITICAL(&data_mux_);
   data_.fix_quality = (int)gga->position_fix;
   data_.fix_valid = fix;
-  data_.satellites = gga->n_satellites;
+  data_.satellites = sats;
   if (fix) {
     data_.last_fix_ms = now_ms;
   }
 
-  data_.latitude_deg = lat;
-  data_.longitude_deg = lon;
+  if (ok) {
+    if (gga->latitude.cardinal != NMEA_CARDINAL_DIR_UNKNOWN && gga->longitude.cardinal != NMEA_CARDINAL_DIR_UNKNOWN) {
+      data_.latitude_deg = lat;
+      data_.longitude_deg = lon;
+    }
 
-  data_.altitude_m = gga->altitude;
-  data_.altitude_valid = (gga->altitude_unit == 'M');
+    if (gga->altitude_unit == 'M') {
+      data_.altitude_m = gga->altitude;
+      data_.altitude_valid = true;
+    } else {
+      data_.altitude_valid = false;
+    }
 
-  // GGA time is time-of-day only.
-  if (gga->time.tm_hour >= 0 && gga->time.tm_hour <= 23 && gga->time.tm_min >= 0 && gga->time.tm_min <= 59 &&
-      gga->time.tm_sec >= 0 && gga->time.tm_sec <= 59) {
-    data_.utc.hour = gga->time.tm_hour;
-    data_.utc.min = gga->time.tm_min;
-    data_.utc.sec = gga->time.tm_sec;
-    data_.utc.time_valid = true;
-    data_.last_time_ms = now_ms;
+    // GGA time is time-of-day only.
+    if (gga->time.tm_hour >= 0 && gga->time.tm_hour <= 23 && gga->time.tm_min >= 0 && gga->time.tm_min <= 59 &&
+        gga->time.tm_sec >= 0 && gga->time.tm_sec <= 59) {
+      data_.utc.hour = gga->time.tm_hour;
+      data_.utc.min = gga->time.tm_min;
+      data_.utc.sec = gga->time.tm_sec;
+      data_.utc.time_valid = true;
+      data_.last_time_ms = now_ms;
+    } else {
+      data_.utc.time_valid = false;
+    }
+  } else {
+    data_.utc.time_valid = false;
+    data_.utc.date_valid = false;
+    data_.altitude_valid = false;
+    data_.speed_valid = false;
+    data_.track_valid = false;
   }
   portEXIT_CRITICAL(&data_mux_);
 }
@@ -364,6 +379,7 @@ void GPSService::update_from_rmc_(const void* rmc_ptr, uint64_t now_ms) {
   }
 
   const bool fix = rmc->valid;
+  const bool ok = fix;  // satellites gate evaluated inside critical section
   const double lat = position_to_decimal(&rmc->latitude);
   const double lon = position_to_decimal(&rmc->longitude);
 
@@ -373,34 +389,45 @@ void GPSService::update_from_rmc_(const void* rmc_ptr, uint64_t now_ms) {
     data_.last_fix_ms = now_ms;
   }
 
-  data_.latitude_deg = lat;
-  data_.longitude_deg = lon;
+  const bool sats_ok = (data_.satellites > 0);
+  if (ok && sats_ok) {
+    if (rmc->latitude.cardinal != NMEA_CARDINAL_DIR_UNKNOWN && rmc->longitude.cardinal != NMEA_CARDINAL_DIR_UNKNOWN) {
+      data_.latitude_deg = lat;
+      data_.longitude_deg = lon;
+    }
 
-  if (!isnan(rmc->gndspd_knots)) {
     data_.speed_knots = rmc->gndspd_knots;
     data_.speed_valid = true;
-  }
-  if (!isnan(rmc->track_deg)) {
+
     data_.track_deg = rmc->track_deg;
     data_.track_valid = true;
-  }
 
-  // RMC has date+time.
-  const struct tm* t = &rmc->date_time;
-  if (t->tm_hour >= 0 && t->tm_hour <= 23 && t->tm_min >= 0 && t->tm_min <= 59 && t->tm_sec >= 0 && t->tm_sec <= 59) {
-    data_.utc.hour = t->tm_hour;
-    data_.utc.min = t->tm_min;
-    data_.utc.sec = t->tm_sec;
-    data_.utc.time_valid = true;
-  }
-  if (t->tm_year >= 70 && t->tm_mon >= 0 && t->tm_mon <= 11 && t->tm_mday >= 1 && t->tm_mday <= 31) {
-    data_.utc.year = t->tm_year + 1900;
-    data_.utc.month = t->tm_mon + 1;
-    data_.utc.day = t->tm_mday;
-    data_.utc.date_valid = true;
-  }
-  if (data_.utc.time_valid) {
-    data_.last_time_ms = now_ms;
+    // RMC has date+time.
+    const struct tm* t = &rmc->date_time;
+    if (t->tm_hour >= 0 && t->tm_hour <= 23 && t->tm_min >= 0 && t->tm_min <= 59 && t->tm_sec >= 0 && t->tm_sec <= 59) {
+      data_.utc.hour = t->tm_hour;
+      data_.utc.min = t->tm_min;
+      data_.utc.sec = t->tm_sec;
+      data_.utc.time_valid = true;
+      data_.last_time_ms = now_ms;
+    } else {
+      data_.utc.time_valid = false;
+    }
+
+    if (t->tm_year >= 70 && t->tm_mon >= 0 && t->tm_mon <= 11 && t->tm_mday >= 1 && t->tm_mday <= 31) {
+      data_.utc.year = t->tm_year + 1900;
+      data_.utc.month = t->tm_mon + 1;
+      data_.utc.day = t->tm_mday;
+      data_.utc.date_valid = true;
+    } else {
+      data_.utc.date_valid = false;
+    }
+  } else {
+    data_.utc.time_valid = false;
+    data_.utc.date_valid = false;
+    data_.altitude_valid = false;
+    data_.speed_valid = false;
+    data_.track_valid = false;
   }
   portEXIT_CRITICAL(&data_mux_);
 }
@@ -491,4 +518,3 @@ void GPSService::log_status_(uint64_t now_ms) {
     }
   }
 }
-

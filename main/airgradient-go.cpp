@@ -58,8 +58,7 @@ static void IRAM_ATTR gpio_isr_handler(void *arg) {
 }
 
 extern "C" void app_main(void) {
-  esp_log_level_set(TAG, ESP_LOG_INFO);
-  esp_log_level_set("GPS", ESP_LOG_DEBUG);
+  esp_log_level_set("GO", ESP_LOG_INFO);
 
   spi_bus_config_t buscfg = {};
   buscfg.mosi_io_num = 25;
