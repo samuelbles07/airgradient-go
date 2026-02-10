@@ -2,18 +2,21 @@
 #include "driver/i2c_types.h"
 #include "driver/spi_master.h"
 #include "driver/i2c_master.h"
-
+#include <math.h>
+#include <limits.h>
 #include "esp_log_level.h"
 #include "esp_timer.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
 #include "soc/gpio_num.h"
 #include "sps30.h"
 #include "gdey0213b74.h"
+#include "nand_storage_service.h"
 
 #include "ui/dashboard_ui.h"
 #include "gps_service.h"
@@ -47,6 +50,22 @@ static bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle);
 static void init_qon_button();
 static void resetExtWatchdog();
 static void log_gps_data(const GPSService::Data &d);
+static void dump_all_storage_records(NandStorageService *storage);
+static NandStorageService storage;
+static uint32_t next_record_id = 0;
+static bool storage_logging_enabled = true;
+static int32_t deg_to_e7(double deg) { return (int32_t)llround(deg * 10000000.0); }
+static uint16_t pm25_to_x10(float ugm3) {
+  if (!(ugm3 >= 0.0f)) { // catches NaN too
+    return 0xFFFF;
+  }
+  const int v = (int)lroundf(ugm3 * 10.0f);
+  if (v < 0)
+    return 0;
+  if (v > 65534)
+    return 65534;
+  return (uint16_t)v;
+}
 
 sps30_handle_t sps30_handle;
 
@@ -100,6 +119,29 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(gps.init(gpsConfig));
   ESP_ERROR_CHECK(gps.start());
 
+  NandStorageService::Config scfg;
+  scfg.spi_host = SPI2_HOST;
+  scfg.cs_pin = GPIO_NUM_4;
+  scfg.clock_speed_hz = 10 * 1000 * 1000;
+  scfg.mount_path = "/nand";
+  scfg.records_path = "/nand/log.bin";
+  ESP_ERROR_CHECK(storage.init(scfg));
+  ESP_ERROR_CHECK(storage.start());
+  // Optional: wait for mount/file open so we can set next_record_id.
+  for (int i = 0; i < 100 && !storage.is_ready(); ++i) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  dump_all_storage_records(&storage);
+  storage.clear_sync(pdMS_TO_TICKS(2000));
+  if (storage.is_ready()) {
+    uint32_t count = 0;
+    if (storage.get_count_sync(&count, pdMS_TO_TICKS(1000)) == ESP_OK) {
+      next_record_id = count; // continue IDs from existing file length
+    }
+  } else {
+    ESP_LOGW(TAG, "storage not ready yet; will start logging when ready");
+  }
+
   // Init E-Paper Display
   ssd1680x::Config cfg;
   cfg.host = SPI2_HOST;
@@ -142,6 +184,19 @@ extern "C" void app_main(void) {
       ESP_LOGI(TAG, "pm25: %.1f", pm25);
       auto gpsData = gps.get();
       log_gps_data(gpsData);
+
+      NandStorageService::Record r;
+      r.id = next_record_id++;
+      r.timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+      r.pm25_ugm3_x10 = pm25_to_x10(pm25);
+      if (gpsData.fix_valid) {
+        r.latitude_e7 = deg_to_e7(gpsData.latitude_deg);
+        r.longitude_e7 = deg_to_e7(gpsData.longitude_deg);
+      } else {
+        r.latitude_e7 = INT32_MIN;  // sentinel for “invalid”
+        r.longitude_e7 = INT32_MIN; // sentinel for “invalid”
+      }
+      (void)storage.enqueue_record(r, false, 0);
     }
 
     // Interval refresh
@@ -288,4 +343,58 @@ void log_gps_data(const GPSService::Data &d) {
              d.fix_quality, d.satellites, time_buf,
              GPSService::antenna_status_to_str(d.antenna_status), d.last_sentence_ms);
   }
+}
+
+void dump_all_storage_records(NandStorageService *storage) {
+  if (!storage) {
+    return;
+  }
+  if (!storage->is_ready()) {
+    ESP_LOGW(TAG, "storage not ready; skip dump");
+    return;
+  }
+  uint32_t total = 0;
+  esp_err_t err = storage->get_count_sync(&total, pdMS_TO_TICKS(2000));
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "get_count_sync failed: %s", esp_err_to_name(err));
+    return;
+  }
+  ESP_LOGI(TAG, "storage records: total=%" PRIu32, total);
+  static constexpr uint32_t CHUNK = 64;
+  static NandStorageService::Record buf[CHUNK];
+  uint32_t idx = 0;
+  while (idx < total) {
+    uint32_t nread = 0;
+    const uint32_t want = (total - idx > CHUNK) ? CHUNK : (total - idx);
+    err = storage->read_range_sync(idx, buf, want, &nread, pdMS_TO_TICKS(5000));
+    if (err != ESP_OK && nread == 0) {
+      ESP_LOGE(TAG, "read_range_sync failed at idx=%" PRIu32 ": %s", idx, esp_err_to_name(err));
+      return;
+    }
+    for (uint32_t i = 0; i < nread; ++i) {
+      const auto &r = buf[i];
+      const bool gps_valid = (r.latitude_e7 != INT32_MIN && r.longitude_e7 != INT32_MIN);
+      const double lat = gps_valid ? ((double)r.latitude_e7 / 10000000.0) : 0.0;
+      const double lon = gps_valid ? ((double)r.longitude_e7 / 10000000.0) : 0.0;
+      const bool pm_valid = (r.pm25_ugm3_x10 != 0xFFFF);
+      const double pm25 = pm_valid ? ((double)r.pm25_ugm3_x10 / 10.0) : 0.0;
+      if (gps_valid && pm_valid) {
+        ESP_LOGI(TAG, "rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=%.7f lon=%.7f", r.id,
+                 r.timestamp_ms, pm25, lat, lon);
+      } else if (pm_valid) {
+        ESP_LOGI(TAG, "rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=-- lon=--", r.id,
+                 r.timestamp_ms, pm25);
+      } else {
+        ESP_LOGI(TAG, "rec id=%" PRIu32 " ts=%" PRIu64 " pm25=-- lat=%s lon=%s", r.id,
+                 r.timestamp_ms, gps_valid ? "OK" : "--", gps_valid ? "OK" : "--");
+      }
+    }
+    idx += nread;
+    // If we hit a CRC error, the service returns err!=OK with partial reads possible.
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "dump stopped early at idx=%" PRIu32 " (%s)", idx, esp_err_to_name(err));
+      return;
+    }
+  }
+  ESP_LOGI(TAG, "storage dump complete");
 }
