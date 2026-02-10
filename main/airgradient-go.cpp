@@ -4,14 +4,15 @@
 #include "driver/i2c_master.h"
 
 #include "esp_timer.h"
-#include "sps30.h"
-
 #include "esp_err.h"
 #include "esp_log.h"
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
+#include "soc/gpio_num.h"
+#include "sps30.h"
+#include "cap1203.h"
 #include "gdey0213b74.h"
 #include "ui/dashboard_ui.h"
 
@@ -20,7 +21,7 @@
 // Set to 1 to deep sleep the panel each iteration.
 // This forces a full refresh (basemap+values) on every update.
 #ifndef GO_DISPLAY_EPD_SLEEP_EACH_ITERATION
-#define GO_DISPLAY_EPD_SLEEP_EACH_ITERATION 0
+#define GO_DISPLAY_EPD_SLEEP_EACH_ITERATION 1
 #endif
 
 #define I2C_MASTER_SCL_IO 6
@@ -28,15 +29,24 @@
 #define I2C_MASTER_PORT I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ 100000 // 100 kHz
 
-#define EN_PM1_GPIO 26 // GPIO 26 - PM sensor load switch + I2C isolator enable
+#define GPIO_EN_PM1 GPIO_NUM_26 // GPIO 26 - PM sensor load switch + I2C isolator enable
+#define GPIO_QON GPIO_NUM_5
 
 static void delay_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
 static const char *TAG = "go-display";
 
 static bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle);
+static void init_qon_button();
 
 sps30_handle_t sps30_handle;
+
+static QueueHandle_t gpio_evt_queue = NULL;
+static void button_task(void *arg);
+static void IRAM_ATTR gpio_isr_handler(void *arg) {
+  uint32_t gpio_num = (uint32_t)arg;
+  xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+}
 
 extern "C" void app_main(void) {
   esp_log_level_set(TAG, ESP_LOG_INFO);
@@ -68,6 +78,7 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
 
   init_sps30_sensor(bus_handle);
+  init_qon_button();
 
   // Init E-Paper Display
   ssd1680x::Config cfg;
@@ -92,15 +103,22 @@ extern "C" void app_main(void) {
   }
 
   float pm25 = 0.7f;
-  uint32_t iter = MILLIS();
+  uint32_t displayRefreshStart = MILLIS();
+  uint32_t lastPmRead = MILLIS();
   sps30_measurement_t sps30_result;
   while (1) {
-    sps30_read_measurement(sps30_handle, &sps30_result);
-    pm25 = sps30_result.pm2p5_mass;
-    ESP_LOGI(TAG, "pm25: %.1f", pm25);
 
-    if ((MILLIS() - iter) >= 5000) {
-      iter = MILLIS();
+    // Interval pm
+    if ((MILLIS() - lastPmRead) >= 1000) {
+      lastPmRead = MILLIS();
+      sps30_read_measurement(sps30_handle, &sps30_result);
+      pm25 = sps30_result.pm2p5_mass;
+      ESP_LOGI(TAG, "pm25: %.1f", pm25);
+    }
+
+    // Interval refresh
+    if ((MILLIS() - displayRefreshStart) >= 10000) {
+      displayRefreshStart = MILLIS();
 
       ui.set_pm25_ugm3(pm25);
 
@@ -123,7 +141,7 @@ extern "C" void app_main(void) {
 #endif
     }
 
-    delay_ms(1000);
+    delay_ms(10);
   }
 }
 
@@ -132,13 +150,13 @@ bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle) {
   gpio_config_t io_conf = {};
   io_conf.intr_type = GPIO_INTR_DISABLE;
   io_conf.mode = GPIO_MODE_OUTPUT;
-  io_conf.pin_bit_mask = (1ULL << EN_PM1_GPIO);
+  io_conf.pin_bit_mask = (1ULL << GPIO_EN_PM1);
   io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
   io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
   gpio_config(&io_conf);
 
   // Enable PM sensor power (TPS27081A load switch + TMUX121 I2C isolator)
-  gpio_set_level((gpio_num_t)EN_PM1_GPIO, 1);
+  gpio_set_level((gpio_num_t)GPIO_EN_PM1, 1);
   ESP_LOGI(TAG, "EN_PM1 enabled (IO26=HIGH) - PM sensor powered");
 
   // Wait for power stabilization
@@ -167,4 +185,45 @@ bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle) {
   // ESP_LOGI(TAG, "SPS30 ready (sleep mode)");
   ESP_LOGI(TAG, "SPS30 ready");
   return true;
+}
+
+void init_qon_button() {
+  gpio_config_t io_conf = {};
+  io_conf.pin_bit_mask = (1ULL << GPIO_QON);
+  io_conf.mode = GPIO_MODE_INPUT;
+  io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  io_conf.intr_type = GPIO_INTR_ANYEDGE;
+  gpio_config(&io_conf);
+
+  // Create queue
+  gpio_evt_queue = xQueueCreate(3, sizeof(uint32_t));
+
+  // Start task to handle events
+  xTaskCreate(button_task, "button_task", 2048, NULL, 10, NULL);
+  // Install GPIO ISR service
+  gpio_install_isr_service(0);
+  // Hook ISR handler
+  gpio_isr_handler_add(GPIO_QON, gpio_isr_handler, (void *)GPIO_QON);
+}
+
+void button_task(void *arg) {
+  uint32_t io_num;
+  uint32_t lastButtonPressed = MILLIS();
+  while (1) {
+    if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
+      // Handle debouncing
+      if ((MILLIS() - lastButtonPressed) <= 300) {
+        continue;
+      }
+      lastButtonPressed = MILLIS();
+
+      int level = gpio_get_level(static_cast<gpio_num_t>(io_num));
+      if (level == 0) {
+        ESP_LOGI(TAG, "Button PRESSED (GPIO %d)", io_num);
+      } else {
+        ESP_LOGI(TAG, "Button RELEASED (GPIO %d)", io_num);
+      }
+    }
+  }
 }

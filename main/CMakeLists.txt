@@ -4,5 +4,5 @@ idf_component_register(
         "ui/u8g2_canvas.cpp"
         "ui/dashboard_ui.cpp"
     INCLUDE_DIRS "."
-    REQUIRES edp-ssd1680x driver u8g2 sps30
+    REQUIRES edp-ssd1680x driver u8g2 sps30 freertos
 )
