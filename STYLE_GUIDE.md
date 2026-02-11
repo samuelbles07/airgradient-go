@@ -123,9 +123,28 @@ If you don't want logging, use small local helpers instead:
 - Do not use lambdas for simple delays or small helpers in application code.
   Prefer named functions:
 
+- Never use the ternary operator (`?:`). Use `if`/`else` for clarity.
+
 ```cpp
 static void step_pause(void) {
   vTaskDelay(pdMS_TO_TICKS(STEP_DELAY_MS));
+}
+```
+
+Avoid:
+
+```cpp
+const bool pressed = active_low ? (level == 0) : (level != 0);
+```
+
+Prefer:
+
+```cpp
+bool pressed = false;
+if (active_low) {
+  pressed = (level == 0);
+} else {
+  pressed = (level != 0);
 }
 ```
 

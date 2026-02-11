@@ -166,7 +166,12 @@ esp_err_t ButtonService::_init_gpio() {
   ESP_RETURN_ON_ERROR(gpio_config(&phy), TAG, "physical gpio config failed");
 
   const int level = gpio_get_level(cfg_.physical_gpio);
-  const bool active = cfg_.physical_active_low ? (level == 0) : (level != 0);
+  bool active = false;
+  if (cfg_.physical_active_low) {
+    active = (level == 0);
+  } else {
+    active = (level != 0);
+  }
   physical_pressed_ = active;
   return ESP_OK;
 }
@@ -322,7 +327,10 @@ void ButtonService::_handle_cap1203_irq() {
         (void)esp_timer_start_once(touch_long_timer_[i], (uint64_t)cfg_.long_press_ms * 1000ULL);
       }
     } else if (!is && was) {
-      const uint32_t dur = (touch_press_ms_[i] != 0) ? (now - touch_press_ms_[i]) : 0;
+      uint32_t dur = 0;
+      if (touch_press_ms_[i] != 0) {
+        dur = now - touch_press_ms_[i];
+      }
 
       if (touch_long_timer_[i] != nullptr) {
         (void)esp_timer_stop(touch_long_timer_[i]);
@@ -332,7 +340,11 @@ void ButtonService::_handle_cap1203_irq() {
       _emit(Event::Release, p);
 
       if (!touch_long_fired_[i]) {
-        _emit((dur >= cfg_.long_press_ms) ? Event::LongPress : Event::ShortPress, p);
+        if (dur >= cfg_.long_press_ms) {
+          _emit(Event::LongPress, p);
+        } else {
+          _emit(Event::ShortPress, p);
+        }
       }
 
       touch_press_ms_[i] = 0;
@@ -350,7 +362,12 @@ void ButtonService::_handle_physical_irq() {
   }
 
   const int level = gpio_get_level(cfg_.physical_gpio);
-  const bool active = cfg_.physical_active_low ? (level == 0) : (level != 0);
+  bool active = false;
+  if (cfg_.physical_active_low) {
+    active = (level == 0);
+  } else {
+    active = (level != 0);
+  }
   if (active == physical_pressed_) {
     return;
   }
@@ -371,7 +388,10 @@ void ButtonService::_handle_physical_irq() {
     }
   } else {
     physical_pressed_ = false;
-    const uint32_t dur = (physical_press_ms_ != 0) ? (now - physical_press_ms_) : 0;
+    uint32_t dur = 0;
+    if (physical_press_ms_ != 0) {
+      dur = now - physical_press_ms_;
+    }
 
     if (physical_long_timer_ != nullptr) {
       (void)esp_timer_stop(physical_long_timer_);
@@ -381,7 +401,11 @@ void ButtonService::_handle_physical_irq() {
     _emit(Event::Release, p);
 
     if (!physical_long_fired_) {
-      _emit((dur >= cfg_.long_press_ms) ? Event::LongPress : Event::ShortPress, p);
+      if (dur >= cfg_.long_press_ms) {
+        _emit(Event::LongPress, p);
+      } else {
+        _emit(Event::ShortPress, p);
+      }
     }
 
     physical_press_ms_ = 0;
@@ -405,7 +429,10 @@ void ButtonService::_on_long_press_timer(Source source, uint8_t id) {
       return;
     }
     physical_long_fired_ = true;
-    const uint32_t dur = (physical_press_ms_ != 0) ? (now - physical_press_ms_) : 0;
+    uint32_t dur = 0;
+    if (physical_press_ms_ != 0) {
+      dur = now - physical_press_ms_;
+    }
     Payload p = {.source = Source::Physical, .id = 0, .touch_mask = 0, .duration_ms = dur};
     _emit(Event::LongPress, p);
     return;
@@ -419,7 +446,10 @@ void ButtonService::_on_long_press_timer(Source source, uint8_t id) {
     return;
   }
   touch_long_fired_[id] = true;
-  const uint32_t dur = (touch_press_ms_[id] != 0) ? (now - touch_press_ms_[id]) : 0;
+  uint32_t dur = 0;
+  if (touch_press_ms_[id] != 0) {
+    dur = now - touch_press_ms_[id];
+  }
   Payload p = {.source = Source::Touch, .id = id, .touch_mask = last_touch_mask_, .duration_ms = dur};
   _emit(Event::LongPress, p);
 }
@@ -440,10 +470,15 @@ esp_err_t ButtonService::disable_wakeup_sources() {
 esp_err_t ButtonService::enable_light_sleep_wakeup() {
   ESP_RETURN_ON_ERROR(disable_wakeup_sources(), TAG, "disable wake failed");
 
-  const gpio_int_type_t cap_level = cfg_.cap_alert_active_low ? GPIO_INTR_LOW_LEVEL
-                                                              : GPIO_INTR_HIGH_LEVEL;
-  const gpio_int_type_t phy_level = cfg_.physical_active_low ? GPIO_INTR_LOW_LEVEL
-                                                             : GPIO_INTR_HIGH_LEVEL;
+  gpio_int_type_t cap_level = GPIO_INTR_HIGH_LEVEL;
+  if (cfg_.cap_alert_active_low) {
+    cap_level = GPIO_INTR_LOW_LEVEL;
+  }
+
+  gpio_int_type_t phy_level = GPIO_INTR_HIGH_LEVEL;
+  if (cfg_.physical_active_low) {
+    phy_level = GPIO_INTR_LOW_LEVEL;
+  }
 
   ESP_RETURN_ON_ERROR(gpio_wakeup_enable(cfg_.cap_alert_gpio, cap_level), TAG,
                       "cap wake enable failed");
@@ -458,7 +493,9 @@ esp_err_t ButtonService::enable_deep_sleep_wakeup() {
   ESP_RETURN_ON_ERROR(disable_wakeup_sources(), TAG, "disable wake failed");
 
   uint64_t mask = 1ULL << (uint32_t)cfg_.physical_gpio;
-  esp_sleep_ext1_wakeup_mode_t mode = cfg_.physical_active_low ? ESP_EXT1_WAKEUP_ANY_LOW
-                                                               : ESP_EXT1_WAKEUP_ANY_HIGH;
+  esp_sleep_ext1_wakeup_mode_t mode = ESP_EXT1_WAKEUP_ANY_HIGH;
+  if (cfg_.physical_active_low) {
+    mode = ESP_EXT1_WAKEUP_ANY_LOW;
+  }
   return esp_sleep_enable_ext1_wakeup(mask, mode);
 }
