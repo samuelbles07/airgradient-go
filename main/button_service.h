@@ -98,6 +98,14 @@ public:
   esp_err_t init();
   esp_err_t deinit();
 
+  // Call right before esp_light_sleep_start().
+  // Disables GPIO interrupts, stops long-press timers, and clears any stale CAP1203 interrupt latch.
+  esp_err_t pre_light_sleep();
+
+  // Call right after esp_light_sleep_start() returns.
+  // Re-enables GPIO interrupts, clears CAP1203 latch, and re-syncs internal pressed state.
+  esp_err_t post_light_sleep();
+
   esp_err_t disable_wakeup_sources();
   esp_err_t enable_light_sleep_wakeup();
   esp_err_t enable_deep_sleep_wakeup();
@@ -146,6 +154,7 @@ private:
 
   QueueHandle_t queue_;
   TaskHandle_t task_;
+  bool task_suspended_;
 
   IsrCtx cap_isr_;
   IsrCtx phy_isr_;

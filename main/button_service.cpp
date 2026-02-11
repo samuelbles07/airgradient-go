@@ -31,6 +31,7 @@ ButtonService::ButtonService(i2c_master_bus_handle_t i2c_bus, const Config &cfg)
       cap_ready_(false),
       queue_(nullptr),
       task_(nullptr),
+      task_suspended_(false),
       cap_isr_(),
       phy_isr_(),
       touch_timer_ctx_{{nullptr, Source::Touch, 0}, {nullptr, Source::Touch, 1},
@@ -104,6 +105,11 @@ esp_err_t ButtonService::init() {
 esp_err_t ButtonService::deinit() {
   (void)_rm_isr_handlers();
 
+  if (task_ != nullptr && task_suspended_) {
+    vTaskResume(task_);
+    task_suspended_ = false;
+  }
+
   if (task_ != nullptr) {
     vTaskDelete(task_);
     task_ = nullptr;
@@ -136,6 +142,111 @@ esp_err_t ButtonService::deinit() {
   physical_last_change_ms_ = 0;
   physical_press_ms_ = 0;
   physical_long_fired_ = false;
+  task_suspended_ = false;
+
+  return ESP_OK;
+}
+
+esp_err_t ButtonService::pre_light_sleep() {
+  if (task_ != nullptr && xTaskGetCurrentTaskHandle() != task_) {
+    vTaskSuspend(task_);
+    task_suspended_ = true;
+  }
+
+  // Prevent ISRs from posting while we prepare state.
+  ESP_RETURN_ON_ERROR(gpio_intr_disable(cfg_.cap_alert_gpio), TAG,
+                      "disable cap gpio interrupt failed");
+  ESP_RETURN_ON_ERROR(gpio_intr_disable(cfg_.physical_gpio), TAG,
+                      "disable physical gpio interrupt failed");
+
+  // Stop timers so they don't fire during sleep transition.
+  for (int i = 0; i < 3; ++i) {
+    if (touch_long_timer_[i] != nullptr) {
+      (void)esp_timer_stop(touch_long_timer_[i]);
+    }
+  }
+  if (physical_long_timer_ != nullptr) {
+    (void)esp_timer_stop(physical_long_timer_);
+  }
+
+  // Clear any stale CAP1203 latch so ALERT# does not remain asserted.
+  if (cap_ready_) {
+    (void)cap1203_.clearInterrupt();
+  }
+
+  return ESP_OK;
+}
+
+esp_err_t ButtonService::post_light_sleep() {
+  const uint32_t now = _now_ms();
+
+  // Re-sync physical state.
+  {
+    const int level = gpio_get_level(cfg_.physical_gpio);
+    bool active = false;
+    if (cfg_.physical_active_low) {
+      active = (level == 0);
+    } else {
+      active = (level != 0);
+    }
+
+    physical_pressed_ = active;
+    physical_last_change_ms_ = now;
+    physical_long_fired_ = false;
+    if (active) {
+      physical_press_ms_ = now;
+      if (physical_long_timer_ != nullptr) {
+        (void)esp_timer_stop(physical_long_timer_);
+        (void)esp_timer_start_once(physical_long_timer_,
+                                  (uint64_t)cfg_.long_press_ms * 1000ULL);
+      }
+    } else {
+      physical_press_ms_ = 0;
+      if (physical_long_timer_ != nullptr) {
+        (void)esp_timer_stop(physical_long_timer_);
+      }
+    }
+  }
+
+  // Re-sync touch state and clear the latch.
+  if (cap_ready_) {
+    uint8_t mask = 0;
+    if (cap1203_.readSensorInputStatus(&mask) == ESP_OK) {
+      mask &= 0x07;
+      last_touch_mask_ = mask;
+
+      for (uint8_t i = 0; i < 3; ++i) {
+        const bool pressed = (mask & (1U << i)) != 0;
+        touch_long_fired_[i] = false;
+        if (pressed) {
+          touch_press_ms_[i] = now;
+          if (touch_long_timer_[i] != nullptr) {
+            (void)esp_timer_stop(touch_long_timer_[i]);
+            (void)esp_timer_start_once(touch_long_timer_[i],
+                                      (uint64_t)cfg_.long_press_ms * 1000ULL);
+          }
+        } else {
+          touch_press_ms_[i] = 0;
+          if (touch_long_timer_[i] != nullptr) {
+            (void)esp_timer_stop(touch_long_timer_[i]);
+          }
+        }
+      }
+    }
+
+    (void)cap1203_.clearInterrupt();
+  }
+
+  // Re-enable GPIO interrupts.
+  ESP_RETURN_ON_ERROR(gpio_intr_enable(cfg_.cap_alert_gpio), TAG,
+                      "enable cap gpio interrupt failed");
+  ESP_RETURN_ON_ERROR(gpio_intr_enable(cfg_.physical_gpio), TAG,
+                      "enable physical gpio interrupt failed");
+
+  if (task_ != nullptr && task_suspended_) {
+    vTaskResume(task_);
+    task_suspended_ = false;
+  }
 
   return ESP_OK;
 }
