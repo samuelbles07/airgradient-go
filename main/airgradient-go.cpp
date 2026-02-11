@@ -21,6 +21,7 @@
 #include "gdey0213b74.h"
 #include "nand_storage_service.h"
 #include "WiFiManager.h"
+#include "button_service.h"
 
 #include "ui/dashboard_ui.h"
 #include "gps_service.h"
@@ -40,24 +41,31 @@
 
 #define GPIO_EN_PM1 GPIO_NUM_26 // GPIO 26 - PM sensor load switch + I2C isolator enable
 #define GPIO_QON GPIO_NUM_5
+#define GPIO_ALERT_TOUCH GPIO_NUM_1
 #define GPIO_WDT GPIO_NUM_2
 #define UART_GPS_TX GPIO_NUM_11
 #define UART_GPS_RX GPIO_NUM_12
 #define UART_GPS_PORT UART_NUM_1
 #define UART_GPS_BAUD 9600
 
+#define DISPLAY_REFRESH_INTERVAL_MS 5000
+#define MEASURES_INTERVAL 2000
+#define WDT_INTERVAL 60000
+
 static void delay_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
 static const char *TAG = "GO";
 
 static bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle);
-static void init_qon_button();
 static void resetExtWatchdog();
 static void log_gps_data(const GPSService::Data &d);
 static void dump_all_storage_records(NandStorageService *storage);
-static NandStorageService storage;
-static uint32_t next_record_id = 0;
-static bool storage_logging_enabled = true;
+static bool wifi_connect(const std::string &sn);
+static void wifi_disconnect();
+static bool post_request(const std::string &sn, const std::string &data);
+static std::string buildSerialNumber();
+// static void prepare_light_sleep(i2c_master_bus_handle_t bus_handle);
+// static void post_light_sleep(i2c_master_bus_handle_t bus_handle);
 static int32_t deg_to_e7(double deg) { return (int32_t)llround(deg * 10000000.0); }
 static uint16_t pm25_to_x10(float ugm3) {
   if (!(ugm3 >= 0.0f)) { // catches NaN too
@@ -70,22 +78,47 @@ static uint16_t pm25_to_x10(float ugm3) {
     return 65534;
   return (uint16_t)v;
 }
-
-static WiFiManager g_wifiManager;
-
-static bool wifi_connect(const std::string &sn);
-static void wifi_disconnect();
-static bool post_request(const std::string &sn, const std::string &data);
-static std::string buildSerialNumber();
-
-sps30_handle_t sps30_handle;
-
-static QueueHandle_t gpio_evt_queue = NULL;
-static void button_task(void *arg);
-static void IRAM_ATTR gpio_isr_handler(void *arg) {
-  uint32_t gpio_num = (uint32_t)arg;
-  xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+static const char *event_to_str(int32_t id) {
+  switch ((ButtonService::Event)id) {
+  case ButtonService::Event::Press:
+    return "press";
+  case ButtonService::Event::Release:
+    return "release";
+  case ButtonService::Event::ShortPress:
+    return "short";
+  case ButtonService::Event::LongPress:
+    return "long";
+  default:
+    return "unknown";
+  }
 }
+static const char *source_to_str(ButtonService::Source s) {
+  switch (s) {
+  case ButtonService::Source::Touch:
+    return "touch";
+  case ButtonService::Source::Physical:
+    return "physical";
+  default:
+    return "unknown";
+  }
+}
+static void on_button_event(void *arg, esp_event_base_t base, int32_t id, void *event_data) {
+  (void)arg;
+  (void)base;
+  if (event_data == nullptr) {
+    ESP_LOGW(TAG, "event=%s data=null", event_to_str(id));
+    return;
+  }
+  const ButtonService::Payload *p = (const ButtonService::Payload *)event_data;
+  ESP_LOGI(TAG, "src=%s event=%s id=%u mask=0x%02x dur=%ums", source_to_str(p->source),
+           event_to_str(id), (unsigned)p->id, (unsigned)p->touch_mask, (unsigned)p->duration_ms);
+}
+
+static NandStorageService storage;
+static uint32_t next_record_id = 0;
+static bool storage_logging_enabled = true;
+static WiFiManager g_wifiManager;
+sps30_handle_t sps30_handle;
 
 extern "C" void app_main(void) {
   esp_log_level_set("GO", ESP_LOG_INFO);
@@ -120,13 +153,22 @@ extern "C" void app_main(void) {
   i2c_master_bus_handle_t bus_handle;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
 
-  wifi_connect(serialNumber);
-
+  // Init PM
   init_sps30_sensor(bus_handle);
-  init_qon_button();
 
-  // Init GPS
-  GPSService::Config gpsConfig;
+  ButtonService::Config bcfg;
+  bcfg.physical_gpio = GPIO_QON;
+  bcfg.cap_alert_gpio = GPIO_ALERT_TOUCH;
+  bcfg.cap_alert_active_low = true;
+  bcfg.physical_active_low = true;
+  bcfg.debounce_ms = 200;
+  bcfg.long_press_ms = 2500;
+  ButtonService buttonService(bus_handle, bcfg);
+  buttonService.init();
+  esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, nullptr);
+
+      // Init GPS
+      GPSService::Config gpsConfig;
   gpsConfig.uart_num = UART_GPS_PORT;
   gpsConfig.rx_pin = UART_GPS_RX;
   gpsConfig.tx_pin = UART_GPS_TX;
@@ -136,6 +178,7 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(gps.init(gpsConfig));
   ESP_ERROR_CHECK(gps.start());
 
+  // Init flash storage
   NandStorageService::Config scfg;
   scfg.spi_host = SPI2_HOST;
   scfg.cs_pin = GPIO_NUM_4;
@@ -188,13 +231,13 @@ extern "C" void app_main(void) {
   sps30_measurement_t sps30_result;
   while (1) {
 
-    if ((MILLIS() - lastWdtReset) > 60000) {
+    if ((MILLIS() - lastWdtReset) > WDT_INTERVAL) {
       lastWdtReset = MILLIS();
       resetExtWatchdog();
     }
 
-    // Interval pm
-    if ((MILLIS() - lastPmRead) >= 1000) {
+    // Measures interval
+    if ((MILLIS() - lastPmRead) >= MEASURES_INTERVAL) {
       lastPmRead = MILLIS();
       sps30_read_measurement(sps30_handle, &sps30_result);
       pm25 = sps30_result.pm2p5_mass;
@@ -213,11 +256,11 @@ extern "C" void app_main(void) {
         r.latitude_e7 = INT32_MIN;  // sentinel for “invalid”
         r.longitude_e7 = INT32_MIN; // sentinel for “invalid”
       }
-      (void)storage.enqueue_record(r, false, 0);
+      storage.enqueue_record(r, false, 0);
     }
 
-    // Interval refresh
-    if ((MILLIS() - displayRefreshStart) >= 10000) {
+    // Display refresh interval
+    if ((MILLIS() - displayRefreshStart) >= DISPLAY_REFRESH_INTERVAL_MS) {
       displayRefreshStart = MILLIS();
 
       ui.set_pm25_ugm3(pm25);
@@ -285,47 +328,6 @@ bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle) {
   // ESP_LOGI(TAG, "SPS30 ready (sleep mode)");
   ESP_LOGI(TAG, "SPS30 ready");
   return true;
-}
-
-void init_qon_button() {
-  gpio_config_t io_conf = {};
-  io_conf.pin_bit_mask = (1ULL << GPIO_QON);
-  io_conf.mode = GPIO_MODE_INPUT;
-  io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  io_conf.intr_type = GPIO_INTR_ANYEDGE;
-  gpio_config(&io_conf);
-
-  // Create queue
-  gpio_evt_queue = xQueueCreate(3, sizeof(uint32_t));
-
-  // Start task to handle events
-  xTaskCreate(button_task, "button_task", 2048, NULL, 10, NULL);
-  // Install GPIO ISR service
-  gpio_install_isr_service(0);
-  // Hook ISR handler
-  gpio_isr_handler_add(GPIO_QON, gpio_isr_handler, (void *)GPIO_QON);
-}
-
-void button_task(void *arg) {
-  uint32_t io_num;
-  uint32_t lastButtonPressed = MILLIS();
-  while (1) {
-    if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
-      // Handle debouncing
-      if ((MILLIS() - lastButtonPressed) <= 300) {
-        continue;
-      }
-      lastButtonPressed = MILLIS();
-
-      int level = gpio_get_level(static_cast<gpio_num_t>(io_num));
-      if (level == 0) {
-        ESP_LOGI(TAG, "Button PRESSED (GPIO %d)", io_num);
-      } else {
-        ESP_LOGI(TAG, "Button RELEASED (GPIO %d)", io_num);
-      }
-    }
-  }
 }
 
 void resetExtWatchdog() {
