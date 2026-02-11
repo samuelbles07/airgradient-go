@@ -4,7 +4,9 @@
 #include "driver/i2c_master.h"
 #include <math.h>
 #include <limits.h>
+#include <string>
 #include "esp_log_level.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -12,11 +14,13 @@
 #include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_http_client.h"
 
 #include "soc/gpio_num.h"
 #include "sps30.h"
 #include "gdey0213b74.h"
 #include "nand_storage_service.h"
+#include "WiFiManager.h"
 
 #include "ui/dashboard_ui.h"
 #include "gps_service.h"
@@ -67,6 +71,13 @@ static uint16_t pm25_to_x10(float ugm3) {
   return (uint16_t)v;
 }
 
+static WiFiManager g_wifiManager;
+
+static bool wifi_connect(const std::string &sn);
+static void wifi_disconnect();
+static bool post_request(const std::string &sn, const std::string &data);
+static std::string buildSerialNumber();
+
 sps30_handle_t sps30_handle;
 
 static QueueHandle_t gpio_evt_queue = NULL;
@@ -78,6 +89,10 @@ static void IRAM_ATTR gpio_isr_handler(void *arg) {
 
 extern "C" void app_main(void) {
   esp_log_level_set("GO", ESP_LOG_INFO);
+  vTaskDelay(pdMS_TO_TICKS(1000));
+
+  std::string serialNumber = buildSerialNumber();
+  ESP_LOGI(TAG, "Serial number %s", serialNumber.c_str());
 
   spi_bus_config_t buscfg = {};
   buscfg.mosi_io_num = 25;
@@ -104,6 +119,8 @@ extern "C" void app_main(void) {
   bus_cfg.flags.enable_internal_pullup = true;
   i2c_master_bus_handle_t bus_handle;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
+
+  wifi_connect(serialNumber);
 
   init_sps30_sensor(bus_handle);
   init_qon_button();
@@ -397,4 +414,55 @@ void dump_all_storage_records(NandStorageService *storage) {
     }
   }
   ESP_LOGI(TAG, "storage dump complete");
+}
+
+bool wifi_connect(const std::string &sn) {
+  std::string ssid = std::string("airgradient-") + sn;
+  if (g_wifiManager.autoConnect(ssid.c_str(), "cleanair") == false) {
+    ESP_LOGE(TAG, "Failed connect to WiFi");
+    return false;
+  }
+  return true;
+}
+
+void wifi_disconnect() { g_wifiManager.disconnect(true); }
+
+bool post_request(const std::string &sn, const std::string &data) {
+  esp_http_client_config_t config = {};
+  char url[80] = {0};
+  sprintf(url, "http://hw.airgradient.com/sensors/airgradient:%s/measures", sn.c_str());
+  config.url = url;
+  config.method = HTTP_METHOD_POST;
+  config.cert_pem = nullptr;
+  config.timeout_ms = 10000;
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+
+  esp_http_client_set_header(client, "Content-Type", "application/json");
+  esp_http_client_set_post_field(client, data.c_str(), data.length());
+
+  if (esp_http_client_perform(client) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed perform HTTP POST");
+    esp_http_client_cleanup(client);
+    return false;
+  }
+  int responseCode = esp_http_client_get_status_code(client);
+  esp_http_client_cleanup(client);
+
+  return (responseCode == 200 || responseCode == 201);
+}
+
+std::string buildSerialNumber() {
+  uint8_t mac_address[6];
+  esp_err_t err = esp_read_mac(mac_address, ESP_MAC_WIFI_STA);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to get MAC address (%s)", esp_err_to_name(err));
+    return {};
+  }
+
+  char result[13] = {0};
+  snprintf(result, sizeof(result), "%02x%02x%02x%02x%02x%02x", mac_address[0], mac_address[1],
+           mac_address[2], mac_address[3], mac_address[4], mac_address[5]);
+  std::string sn = std::string(result);
+
+  return sn;
 }

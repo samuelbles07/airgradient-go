@@ -603,6 +603,7 @@ void NandStorageService::task_() {
   ret = spi_nand_flash_init_device(&nand_cfg, &st.nand);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "spi_nand_flash_init_device failed: %s", esp_err_to_name(ret));
+    st.nand = nullptr;
     last_error_ = ret;
     goto out;
   }
