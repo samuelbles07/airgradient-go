@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS
-        "airgradient-go.cpp"
+        "go.cpp"
         "button_service.cpp"
         "gps_service.cpp"
         "nand_storage_service.cpp"
