@@ -571,10 +571,18 @@ void ButtonService::_emit(Event ev, const Payload &p) {
 }
 
 esp_err_t ButtonService::disable_wakeup_sources() {
-  ESP_RETURN_ON_ERROR(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO), TAG,
-                      "disable gpio wake failed");
-  ESP_RETURN_ON_ERROR(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT1), TAG,
-                      "disable ext1 wake failed");
+  // Attempt to disable GPIO wakeup
+  esp_err_t err = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+      ESP_LOGW(TAG, "Unexpected error disabling GPIO wake: %s", esp_err_to_name(err));
+  }
+
+  // Attempt to disable EXT1 wakeup
+  err = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT1);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+      ESP_LOGW(TAG, "Unexpected error disabling EXT1 wake: %s", esp_err_to_name(err));
+  }
+
   return ESP_OK;
 }
 

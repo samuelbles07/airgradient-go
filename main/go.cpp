@@ -9,6 +9,7 @@
 #include "driver/spi_master.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
@@ -32,6 +33,19 @@ enum class State {
   Tracking,
 };
 
+RTC_DATA_ATTR static State RTC_LAST_STATE = State::Idle;
+
+static bool is_valid_rtc_state(State s) {
+  switch (s) {
+  case State::Idle:
+  case State::Inactive:
+  case State::Sync:
+  case State::Tracking:
+    return true;
+  }
+  return false;
+}
+
 struct Inputs {
   bool button_short = false;
   bool button_long = false;
@@ -51,6 +65,27 @@ struct GoInputEvent {
 static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 static inline void sleep_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
+
+static esp_err_t init_ext_watchdog(void) {
+  gpio_config_t io_conf = {};
+  io_conf.intr_type = GPIO_INTR_DISABLE;
+  io_conf.mode = GPIO_MODE_OUTPUT;
+  io_conf.pin_bit_mask = (1ULL << GO_WDT_GPIO);
+  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+  esp_err_t err = gpio_config(&io_conf);
+  if (err != ESP_OK) {
+    return err;
+  }
+  (void)gpio_set_level(GO_WDT_GPIO, 0);
+  return ESP_OK;
+}
+
+static void reset_ext_watchdog(void) {
+  (void)gpio_set_level(GO_WDT_GPIO, 1);
+  sleep_ms(GO_WDT_RESET_PULSE_MS);
+  (void)gpio_set_level(GO_WDT_GPIO, 0);
+}
 
 static const char *state_name(State s) {
   switch (s) {
@@ -167,8 +202,15 @@ static esp_err_t init_display(ui::DashboardUI **ui_out, ssd1680x::panels::GDEY02
 class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, sps30_handle_t sps30,
-               GPSService *gps, ui::DashboardUI *ui, ssd1680x::panels::GDEY0213B74 *epd)
-      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps), ui_(ui), epd_(epd) {
+               GPSService *gps, ui::DashboardUI *ui, ssd1680x::panels::GDEY0213B74 *epd,
+               uint32_t last_wdt_reset_ms)
+      : buttons_(buttons),
+        input_queue_(input_queue),
+        sps30_(sps30),
+        gps_(gps),
+        ui_(ui),
+        epd_(epd),
+        last_wdt_reset_ms_(last_wdt_reset_ms) {
   }
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
@@ -223,6 +265,8 @@ private:
   ui::DashboardUI *ui_ = nullptr;
   ssd1680x::panels::GDEY0213B74 *epd_ = nullptr;
 
+  uint32_t last_wdt_reset_ms_ = 0;
+
   State _state = State::Idle;
   uint32_t _state_enter_ms = 0;
   uint32_t _last_idle_measure_ms = 0;
@@ -230,8 +274,30 @@ private:
   bool _tracking_started = false;
 
   void _init(void) {
-    // TODO: read persisted boot state (RTC/NVS) to pick initial state.
-    _transition(State::Idle);
+    State last = RTC_LAST_STATE;
+    if (!is_valid_rtc_state(last)) {
+      last = State::Idle;
+    }
+
+    const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+    State initial = State::Idle;
+    if (cause == ESP_SLEEP_WAKEUP_EXT1) {
+      initial = State::Idle;
+    } else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+      if (last == State::Tracking) {
+        initial = State::Tracking;
+      } else {
+        ESP_LOGI(GO_TAG, "Tracking stopped");
+        initial = State::Idle;
+      }
+    } else {
+      initial = State::Idle;
+    }
+
+    ESP_LOGI(GO_TAG, "wake cause=%d last=%s initial=%s", (int)cause, state_name(last),
+             state_name(initial));
+    _transition(initial);
   }
 
   Inputs _poll_inputs(void) {
@@ -293,6 +359,8 @@ private:
   }
 
   void _state_idle(const Inputs &in) {
+    _kick_watchdog_if_needed();
+
     // Transitions from diagram.
     if (in.touch_long) {
       _transition(State::Tracking);
@@ -307,7 +375,7 @@ private:
       return;
     }
 
-    // Auto-inactive after timeout ("30s inactive").
+    // Auto-inactive after timeout
     const uint32_t inactive_elapsed_ms = now_ms() - _state_enter_ms;
     if (inactive_elapsed_ms >= (uint32_t)GO_IDLE_INACTIVE_TIMEOUT_MS) {
       _transition(State::Inactive);
@@ -325,20 +393,20 @@ private:
     }
   }
 
+  void _kick_watchdog_if_needed(void) {
+    const uint32_t elapsed_ms = now_ms() - last_wdt_reset_ms_;
+    if (elapsed_ms < GO_WDT_RESET_INTERVAL_MS) {
+      return;
+    }
+    reset_ext_watchdog();
+    last_wdt_reset_ms_ = now_ms();
+  }
+
   void _state_inactive(const Inputs &in) {
     // INACTIVE: deep sleep until physical button is pressed.
     // Note: deep sleep resets the chip; wake handling/persistence comes later.
     (void)in;
-    if (GO_ENABLE_DEEP_SLEEP) {
-      _inactive_enter_deep_sleep();
-      return;
-    }
-
-    // Skeleton fallback (no deep sleep): stay here until a simulated press.
-    if (in.button_short || in.button_long) {
-      _transition(State::Idle);
-      return;
-    }
+    _inactive_enter_deep_sleep();
   }
 
   void _state_sync(const Inputs &in) {
@@ -426,12 +494,19 @@ private:
     }
 
     ESP_LOGI(GO_TAG, "inactive: entering deep sleep (stub)");
+    esp_err_t err = ESP_OK;
     if (buttons_ != nullptr) {
-      const esp_err_t err = buttons_->enable_deep_sleep_wakeup();
-      if (err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "deep sleep wake config failed: %s", esp_err_to_name(err));
-      }
+      err = buttons_->enable_deep_sleep_wakeup();
+    } else {
+      ESP_LOGE(GO_TAG, "deep sleep wake config failed: buttons not initialized");
+      return;
     }
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "deep sleep wake config failed: %s", esp_err_to_name(err));
+    }
+
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    RTC_LAST_STATE = State::Inactive;
     esp_deep_sleep_start();
   }
 
@@ -491,11 +566,12 @@ private:
         ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(ui_err));
       }
 
-      if (epd_ != nullptr) {
-        const esp_err_t err = epd_->deep_sleep();
-        if (err != ESP_OK) {
-          ESP_LOGW(GO_TAG, "epd deep_sleep failed: %s", esp_err_to_name(err));
-        }
+    }
+
+    if (epd_ != nullptr) {
+      const esp_err_t err = epd_->deep_sleep();
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "epd deep_sleep failed: %s", esp_err_to_name(err));
       }
     }
     return true;
@@ -508,13 +584,26 @@ private:
 
   void _tracking_enter_sleep(void) {
     // TODO: configure wakeup sources/timer and enter tracking sleep.
-    if (GO_ENABLE_DEEP_SLEEP) {
-      ESP_LOGI(GO_TAG, "tracking: entering deep sleep (stub)");
-      esp_deep_sleep_start();
+    ESP_LOGI(GO_TAG, "tracking: entering deep sleep (stub)");
+
+    esp_err_t err = ESP_OK;
+    if (buttons_ != nullptr) {
+      err = buttons_->enable_deep_sleep_wakeup();
+    } else {
+      ESP_LOGE(GO_TAG, "deep sleep wake config failed: buttons not initialized");
       return;
     }
-    ESP_LOGI(GO_TAG, "tracking: sleep disabled (stub)");
-    _transition(State::Idle);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "deep sleep wake config failed: %s", esp_err_to_name(err));
+    }
+
+    err = esp_sleep_enable_timer_wakeup((uint64_t)GO_TRACKING_SLEEP_INTERVAL_S * 1000000ULL);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "timer wake config failed: %s", esp_err_to_name(err));
+    }
+
+    RTC_LAST_STATE = State::Tracking;
+    esp_deep_sleep_start();
   }
 };
 
@@ -533,6 +622,10 @@ static void on_button_event(void *arg, esp_event_base_t base, int32_t id, void *
 extern "C" void app_main(void) {
   esp_log_level_set(GO_TAG, ESP_LOG_INFO);
   sleep_ms(GO_BOOT_DELAY_MS);
+
+  ESP_ERROR_CHECK(init_ext_watchdog());
+  reset_ext_watchdog();
+  const uint32_t wdt_last_reset_ms = now_ms();
 
   i2c_master_bus_config_t bus_cfg = {};
   bus_cfg.i2c_port = GO_I2C_MASTER_PORT;
@@ -618,7 +711,7 @@ extern "C" void app_main(void) {
     return;
   }
 
-  GoController go(&buttons, input_queue, sps30, gps_ptr, ui_ptr, epd_ptr);
+  GoController go(&buttons, input_queue, sps30, gps_ptr, ui_ptr, epd_ptr, wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 

@@ -18,8 +18,8 @@ static constexpr int GO_IDLE_INACTIVE_TIMEOUT_MS = 60000;
 
 static constexpr uint32_t GO_INPUT_QUEUE_LEN = 16;
 
-// Keep disabled in skeleton to avoid accidental sleep-lock during development.
-static constexpr bool GO_ENABLE_DEEP_SLEEP = false;
+// Tracking sleep interval.
+static constexpr uint32_t GO_TRACKING_SLEEP_INTERVAL_S = 3 * 60;
 
 // GPS (UART).
 static constexpr uart_port_t GO_GPS_UART_PORT = UART_NUM_1;
@@ -27,6 +27,11 @@ static constexpr gpio_num_t GO_GPS_UART_TX_GPIO = GPIO_NUM_11;
 static constexpr gpio_num_t GO_GPS_UART_RX_GPIO = GPIO_NUM_12;
 static constexpr int GO_GPS_UART_BAUD = 9600;
 static constexpr bool GO_GPS_LOG_RAW_NMEA = false;
+
+// External watchdog.
+static constexpr gpio_num_t GO_WDT_GPIO = GPIO_NUM_2;
+static constexpr uint32_t GO_WDT_RESET_PULSE_MS = 20;
+static constexpr uint32_t GO_WDT_RESET_INTERVAL_MS = 60 * 1000;
 
 // EPD display (SPI + SSD1680x panel).
 static constexpr spi_host_device_t GO_SPI_HOST = SPI2_HOST;
