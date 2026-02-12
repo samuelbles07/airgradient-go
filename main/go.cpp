@@ -3,7 +3,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
-
+#include <fcntl.h>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
@@ -13,7 +13,11 @@
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+#include "esp_console.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/projdefs.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
@@ -197,6 +201,41 @@ static esp_err_t init_display(ui::DashboardUI **ui_out, ssd1680x::panels::GDEY02
   *ui_out = &ui;
   *epd_out = &epd;
   return ESP_OK;
+}
+
+static void initConsole() {
+  fflush(stdout);
+  fsync(fileno(stdout));
+  esp_console_deinit();
+
+  /* Minicom, screen, idf_monitor send CR when ENTER key is pressed */
+  usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+  /* Move the caret to the beginning of the next line on '\n' */
+  usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+
+  /* Enable blocking mode on stdin and stdout */
+  fcntl(fileno(stdout), F_SETFL, 0);
+  fcntl(fileno(stdin), F_SETFL, 0);
+
+  usb_serial_jtag_driver_config_t jtag_config = {
+      .tx_buffer_size = 256,
+      .rx_buffer_size = 256,
+  };
+
+  /* Install USB-SERIAL-JTAG driver for interrupt-driven reads and writes */
+  ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&jtag_config));
+
+  /* Tell vfs to use usb-serial-jtag driver */
+  usb_serial_jtag_vfs_use_driver();
+
+  /* Initialize the console */
+  esp_console_config_t console_config = {.max_cmdline_length = CONSOLE_MAX_CMDLINE_LENGTH,
+                                         .max_cmdline_args = CONSOLE_MAX_CMDLINE_ARGS,
+#if CONFIG_LOG_COLORS
+                                         .hint_color = atoi(LOG_COLOR_CYAN)
+#endif
+  };
+  ESP_ERROR_CHECK(esp_console_init(&console_config));
 }
 
 class GoController {
@@ -620,6 +659,14 @@ static void on_button_event(void *arg, esp_event_base_t base, int32_t id, void *
 }
 
 extern "C" void app_main(void) {
+  vTaskDelay(pdMS_TO_TICKS(100));
+  // Re-initialize console after deepsleep
+  esp_sleep_wakeup_cause_t wakeUpReason = esp_sleep_get_wakeup_cause();
+  if (wakeUpReason != ESP_SLEEP_WAKEUP_UNDEFINED) {
+    initConsole();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+
   esp_log_level_set(GO_TAG, ESP_LOG_INFO);
   sleep_ms(GO_BOOT_DELAY_MS);
 

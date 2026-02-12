@@ -10,6 +10,10 @@
 
 static constexpr char GO_TAG[] = "GO";
 
+#define CONSOLE_MAX_CMDLINE_ARGS 8
+#define CONSOLE_MAX_CMDLINE_LENGTH 256
+#define CONSOLE_PROMPT_MAX_LEN (32)
+
 static constexpr int GO_BOOT_DELAY_MS = 1000;
 
 static constexpr int GO_MAIN_LOOP_DELAY_MS = 50;
