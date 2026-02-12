@@ -7,13 +7,14 @@ This document defines coding conventions for agents and contributors.
 - Use `clang-format` with:
 
 ```text
---style={ BasedOnStyle: LLVM, ColumnLimit: 100, UseTab: Never, IndentWidth: 2, TabWidth: 2, BreakBeforeBraces: Attach, CommentPragmas: "^", SortIncludes: false }
+--style={ BasedOnStyle: LLVM, ColumnLimit: 100, UseTab: Never, IndentWidth: 2, TabWidth: 2, BreakBeforeBraces: Attach, CommentPragmas: "^", SortIncludes: false, PointerAlignment: Right, ReferenceAlignment: Right, IndentCaseLabels: false }
 ```
 
 - Indentation: 2 spaces, no tabs.
 - Braces: attach style.
 - Keep lines <= 100 columns.
 - Do not rely on include sorting; keep includes intentional.
+- One-line `static inline` helpers are fine when they fit within the 100 column limit.
 
 ## Headers
 
@@ -116,6 +117,11 @@ If you don't want logging, use small local helpers instead:
   - Acquire/release is done only in top-level public operations.
   - Hold the bus only while actively transmitting (CMD/DATA bursts, RAM streaming, update triggers).
   - Never hold the bus while waiting on long device states (e.g., `BUSY` polling for e-paper refresh).
+
+## Initialization placement
+
+- Initialize shared buses (SPI/I2C) once in top-level code (e.g., `app_main`).
+- Device/UI init helpers assume the bus is already initialized and should not call `spi_bus_initialize` / `i2c_new_master_bus`.
 
 ## C++ usage
 
