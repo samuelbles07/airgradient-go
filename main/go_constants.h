@@ -5,6 +5,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_types.h"
+#include "driver/spi_master.h"
 #include "driver/uart.h"
 
 static constexpr char GO_TAG[] = "GO";
@@ -26,6 +27,23 @@ static constexpr gpio_num_t GO_GPS_UART_TX_GPIO = GPIO_NUM_11;
 static constexpr gpio_num_t GO_GPS_UART_RX_GPIO = GPIO_NUM_12;
 static constexpr int GO_GPS_UART_BAUD = 9600;
 static constexpr bool GO_GPS_LOG_RAW_NMEA = false;
+
+// EPD display (SPI + SSD1680x panel).
+static constexpr spi_host_device_t GO_SPI_HOST = SPI2_HOST;
+static constexpr gpio_num_t GO_SPI_MOSI_GPIO = GPIO_NUM_25;
+static constexpr gpio_num_t GO_SPI_MISO_GPIO = GPIO_NUM_24;
+static constexpr gpio_num_t GO_SPI_SCLK_GPIO = GPIO_NUM_23;
+static constexpr int GO_SPI_MAX_TRANSFER_SZ = 4096;
+
+static constexpr gpio_num_t GO_EPD_BUSY_GPIO = GPIO_NUM_10;
+static constexpr gpio_num_t GO_EPD_RST_GPIO = GPIO_NUM_9;
+static constexpr gpio_num_t GO_EPD_DC_GPIO = GPIO_NUM_15;
+static constexpr gpio_num_t GO_EPD_CS_GPIO = GPIO_NUM_0;
+
+static constexpr int GO_EPD_CLOCK_SPEED_HZ = 4 * 1000 * 1000;
+static constexpr int GO_EPD_SPI_MODE = 0;
+static constexpr int GO_EPD_SPI_QUEUE_SIZE = 1;
+static constexpr uint32_t GO_EPD_SPI_DEVICE_FLAGS = SPI_DEVICE_HALFDUPLEX;
 
 // SPS30 (PM sensor).
 static constexpr gpio_num_t GO_PM_POWER_GPIO = GPIO_NUM_26;

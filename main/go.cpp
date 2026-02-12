@@ -6,6 +6,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/spi_master.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -18,6 +19,9 @@
 #include "button_service.h"
 #include "gps_service.h"
 #include "go_constants.h"
+
+#include "gdey0213b74.h"
+#include "ui/dashboard_ui.h"
 
 #include "sps30.h"
 
@@ -44,29 +48,25 @@ struct GoInputEvent {
   GoInputEventType type;
 };
 
-static inline uint32_t now_ms(void) {
-  return (uint32_t)(esp_timer_get_time() / 1000);
-}
+static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-static inline void sleep_ms(uint32_t ms) {
-  vTaskDelay(pdMS_TO_TICKS(ms));
-}
+static inline void sleep_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
-static const char* state_name(State s) {
+static const char *state_name(State s) {
   switch (s) {
-    case State::Idle:
-      return "IDLE";
-    case State::Inactive:
-      return "INACTIVE";
-    case State::Sync:
-      return "SYNC";
-    case State::Tracking:
-      return "TRACKING";
+  case State::Idle:
+    return "IDLE";
+  case State::Inactive:
+    return "INACTIVE";
+  case State::Sync:
+    return "SYNC";
+  case State::Tracking:
+    return "TRACKING";
   }
   return "UNKNOWN";
 }
 
-static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_handle_t* out) {
+static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_handle_t *out) {
   if (out == nullptr) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -105,7 +105,7 @@ static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_han
   return ESP_OK;
 }
 
-static void log_gps_data(const GPSService::Data& d) {
+static void log_gps_data(const GPSService::Data &d) {
   if (!d.has_sentence) {
     ESP_LOGI(GO_TAG, "gps: no sentence");
     return;
@@ -123,26 +123,55 @@ static void log_gps_data(const GPSService::Data& d) {
   }
 
   if (d.fix_valid) {
-    ESP_LOGI(GO_TAG,
-             "gps: fix=1 q=%d sats=%d lat=%.6f lon=%.6f time=%s last_sentence=%" PRIu64 "ms",
-             d.fix_quality, d.satellites, d.latitude_deg, d.longitude_deg, time_buf,
-             d.last_sentence_ms);
+    ESP_LOGI(
+        GO_TAG, "gps: fix=1 q=%d sats=%d lat=%.6f lon=%.6f time=%s last_sentence=%" PRIu64 "ms",
+        d.fix_quality, d.satellites, d.latitude_deg, d.longitude_deg, time_buf, d.last_sentence_ms);
   } else {
     ESP_LOGI(GO_TAG, "gps: fix=0 q=%d sats=%d time=%s last_sentence=%" PRIu64 "ms", d.fix_quality,
              d.satellites, time_buf, d.last_sentence_ms);
   }
 }
 
-class GoController {
- public:
-  GoController(ButtonService* buttons,
-               QueueHandle_t input_queue,
-               sps30_handle_t sps30,
-               GPSService* gps)
-      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps) {
+static esp_err_t init_display(ui::DashboardUI **ui_out, ssd1680x::panels::GDEY0213B74 **epd_out) {
+  if (ui_out == nullptr || epd_out == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  *ui_out = nullptr;
+  *epd_out = nullptr;
+
+  ssd1680x::Config cfg;
+  cfg.host = GO_SPI_HOST;
+  cfg.pins.busy = GO_EPD_BUSY_GPIO;
+  cfg.pins.rst = GO_EPD_RST_GPIO;
+  cfg.pins.dc = GO_EPD_DC_GPIO;
+  cfg.pins.cs = GO_EPD_CS_GPIO;
+
+  cfg.devcfg.clock_speed_hz = GO_EPD_CLOCK_SPEED_HZ;
+  cfg.devcfg.mode = GO_EPD_SPI_MODE;
+  cfg.devcfg.queue_size = GO_EPD_SPI_QUEUE_SIZE;
+  cfg.devcfg.flags = GO_EPD_SPI_DEVICE_FLAGS;
+
+  static ssd1680x::panels::GDEY0213B74 epd(cfg);
+  static ui::DashboardUI ui(epd);
+
+  esp_err_t err = ui.init();
+  if (err != ESP_OK) {
+    return err;
   }
 
-  void OnButtonEvent(int32_t id, const ButtonService::Payload* p) {
+  *ui_out = &ui;
+  *epd_out = &epd;
+  return ESP_OK;
+}
+
+class GoController {
+public:
+  GoController(ButtonService *buttons, QueueHandle_t input_queue, sps30_handle_t sps30,
+               GPSService *gps, ui::DashboardUI *ui, ssd1680x::panels::GDEY0213B74 *epd)
+      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps), ui_(ui), epd_(epd) {
+  }
+
+  void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
     if (p == nullptr) {
       return;
     }
@@ -155,12 +184,12 @@ class GoController {
       if (ev == ButtonService::Event::ShortPress) {
         GoInputEvent e;
         e.type = GoInputEventType::ButtonShort;
-        ESP_LOGI("Event", "Button short");
+        ESP_LOGI(GO_TAG, "event: physical short");
         (void)xQueueSend(input_queue_, &e, 0);
       } else if (ev == ButtonService::Event::LongPress) {
         GoInputEvent e;
         e.type = GoInputEventType::ButtonLong;
-        ESP_LOGI("Event", "Button long");
+        ESP_LOGI(GO_TAG, "event: physical long");
         (void)xQueueSend(input_queue_, &e, 0);
       }
       return;
@@ -170,7 +199,7 @@ class GoController {
       if (p->id == GO_TRACKING_TOUCH_ID && ev == ButtonService::Event::LongPress) {
         GoInputEvent e;
         e.type = GoInputEventType::TouchLong;
-        ESP_LOGI("Event", "Touch long");
+        ESP_LOGI(GO_TAG, "event: touch long");
         (void)xQueueSend(input_queue_, &e, 0);
       }
       return;
@@ -186,11 +215,13 @@ class GoController {
     }
   }
 
- private:
-  ButtonService* buttons_ = nullptr;
+private:
+  ButtonService *buttons_ = nullptr;
   QueueHandle_t input_queue_ = nullptr;
   sps30_handle_t sps30_ = nullptr;
-  GPSService* gps_ = nullptr;
+  GPSService *gps_ = nullptr;
+  ui::DashboardUI *ui_ = nullptr;
+  ssd1680x::panels::GDEY0213B74 *epd_ = nullptr;
 
   State _state = State::Idle;
   uint32_t _state_enter_ms = 0;
@@ -222,20 +253,20 @@ class GoController {
     return in;
   }
 
-  void _step(const Inputs& in) {
+  void _step(const Inputs &in) {
     switch (_state) {
-      case State::Idle:
-        _state_idle(in);
-        break;
-      case State::Inactive:
-        _state_inactive(in);
-        break;
-      case State::Sync:
-        _state_sync(in);
-        break;
-      case State::Tracking:
-        _state_tracking(in);
-        break;
+    case State::Idle:
+      _state_idle(in);
+      break;
+    case State::Inactive:
+      _state_inactive(in);
+      break;
+    case State::Sync:
+      _state_sync(in);
+      break;
+    case State::Tracking:
+      _state_tracking(in);
+      break;
     }
   }
 
@@ -261,7 +292,7 @@ class GoController {
     }
   }
 
-  void _state_idle(const Inputs& in) {
+  void _state_idle(const Inputs &in) {
     // Transitions from diagram.
     if (in.touch_long) {
       _transition(State::Tracking);
@@ -294,7 +325,7 @@ class GoController {
     }
   }
 
-  void _state_inactive(const Inputs& in) {
+  void _state_inactive(const Inputs &in) {
     // INACTIVE: deep sleep until physical button is pressed.
     // Note: deep sleep resets the chip; wake handling/persistence comes later.
     (void)in;
@@ -310,7 +341,7 @@ class GoController {
     }
   }
 
-  void _state_sync(const Inputs& in) {
+  void _state_sync(const Inputs &in) {
     (void)in;
     // SYNC: connect to Wi-Fi and send stored data; then return to IDLE.
     if (!_sync_started) {
@@ -326,7 +357,7 @@ class GoController {
     }
   }
 
-  void _state_tracking(const Inputs& in) {
+  void _state_tracking(const Inputs &in) {
     // TRACKING: boot -> measure -> save -> display -> sleep.
     // Diagram: touch (long) toggles back to IDLE.
     if (in.touch_long) {
@@ -362,16 +393,38 @@ class GoController {
       return;
     }
 
-    ESP_LOGI(GO_TAG, "pm25: %.1f", (double)m.pm2p5_mass);
+    const float pm25 = m.pm2p5_mass;
+    ESP_LOGI(GO_TAG, "pm25: %.1f", (double)pm25);
 
+    GPSService::Data d;
+    bool gps_ok = false;
     if (gps_ != nullptr) {
-      GPSService::Data d = gps_->get();
+      d = gps_->get();
+      gps_ok = true;
       log_gps_data(d);
+    }
+
+    if (ui_ != nullptr) {
+      (void)ui_->set_pm25_ugm3(pm25);
+      if (gps_ok && d.utc.time_valid) {
+        (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
+      }
+      const esp_err_t ui_err = ui_->refresh();
+      if (ui_err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
+      }
     }
   }
 
   void _inactive_enter_deep_sleep(void) {
     // TODO: configure wakeup source (physical button) and enter deep sleep.
+    if (epd_ != nullptr) {
+      const esp_err_t err = epd_->deep_sleep();
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "epd deep_sleep failed: %s", esp_err_to_name(err));
+      }
+    }
+
     ESP_LOGI(GO_TAG, "inactive: entering deep sleep (stub)");
     if (buttons_ != nullptr) {
       const esp_err_t err = buttons_->enable_deep_sleep_wakeup();
@@ -416,11 +469,34 @@ class GoController {
       return true;
     }
 
-    ESP_LOGI(GO_TAG, "pm25: %.1f", (double)m.pm2p5_mass);
+    const float pm25 = m.pm2p5_mass;
+    ESP_LOGI(GO_TAG, "pm25: %.1f", (double)pm25);
 
+    GPSService::Data d;
+    bool gps_ok = false;
     if (gps_ != nullptr) {
-      GPSService::Data d = gps_->get();
+      d = gps_->get();
+      gps_ok = true;
       log_gps_data(d);
+    }
+
+    if (ui_ != nullptr) {
+      (void)ui_->set_pm25_ugm3(pm25);
+      if (gps_ok && d.utc.time_valid) {
+        (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
+      }
+
+      const esp_err_t ui_err = ui_->full_refresh();
+      if (ui_err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(ui_err));
+      }
+
+      if (epd_ != nullptr) {
+        const esp_err_t err = epd_->deep_sleep();
+        if (err != ESP_OK) {
+          ESP_LOGW(GO_TAG, "epd deep_sleep failed: %s", esp_err_to_name(err));
+        }
+      }
     }
     return true;
   }
@@ -469,6 +545,15 @@ extern "C" void app_main(void) {
   i2c_master_bus_handle_t bus_handle = nullptr;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
 
+  spi_bus_config_t buscfg = {};
+  buscfg.mosi_io_num = GO_SPI_MOSI_GPIO;
+  buscfg.miso_io_num = GO_SPI_MISO_GPIO;
+  buscfg.sclk_io_num = GO_SPI_SCLK_GPIO;
+  buscfg.quadwp_io_num = -1;
+  buscfg.quadhd_io_num = -1;
+  buscfg.max_transfer_sz = GO_SPI_MAX_TRANSFER_SZ;
+  ESP_ERROR_CHECK(spi_bus_initialize(GO_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+
   ButtonService::Config bcfg;
   bcfg.physical_gpio = GO_BUTTON_PHYSICAL_GPIO;
   bcfg.cap_alert_gpio = GO_TOUCH_ALERT_GPIO;
@@ -486,7 +571,7 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(buttons.init());
 
   static GPSService gps;
-  GPSService* gps_ptr = nullptr;
+  GPSService *gps_ptr = nullptr;
   {
     GPSService::Config gps_cfg;
     gps_cfg.uart_num = GO_GPS_UART_PORT;
@@ -516,13 +601,24 @@ extern "C" void app_main(void) {
     }
   }
 
+  ui::DashboardUI *ui_ptr = nullptr;
+  ssd1680x::panels::GDEY0213B74 *epd_ptr = nullptr;
+  {
+    const esp_err_t err = init_display(&ui_ptr, &epd_ptr);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "display init failed: %s", esp_err_to_name(err));
+      ui_ptr = nullptr;
+      epd_ptr = nullptr;
+    }
+  }
+
   QueueHandle_t input_queue = xQueueCreate((UBaseType_t)GO_INPUT_QUEUE_LEN, sizeof(GoInputEvent));
   if (input_queue == nullptr) {
     ESP_LOGE(GO_TAG, "input queue create failed");
     return;
   }
 
-  GoController go(&buttons, input_queue, sps30, gps_ptr);
+  GoController go(&buttons, input_queue, sps30, gps_ptr, ui_ptr, epd_ptr);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
