@@ -12,12 +12,21 @@ static constexpr int GO_BOOT_DELAY_MS = 1000;
 
 static constexpr int GO_MAIN_LOOP_DELAY_MS = 50;
 static constexpr int GO_IDLE_MEASURE_INTERVAL_MS = 5000;
-static constexpr int GO_IDLE_INACTIVE_TIMEOUT_MS = 30000;
+static constexpr int GO_IDLE_INACTIVE_TIMEOUT_MS = 60000;
 
 static constexpr uint32_t GO_INPUT_QUEUE_LEN = 16;
 
 // Keep disabled in skeleton to avoid accidental sleep-lock during development.
 static constexpr bool GO_ENABLE_DEEP_SLEEP = false;
+
+// SPS30 (PM sensor).
+static constexpr gpio_num_t GO_PM_POWER_GPIO = GPIO_NUM_26;
+static constexpr int GO_PM_POWER_ON_LEVEL = 1;
+
+static constexpr uint16_t GO_SPS30_I2C_ADDRESS = 0x69;
+static constexpr uint32_t GO_SPS30_I2C_CLOCK_SPEED_HZ = 100000;
+static constexpr uint32_t GO_SPS30_POWER_STABILIZE_DELAY_MS = 100;
+static constexpr uint32_t GO_SPS30_WARMUP_DELAY_MS = 3000;
 
 // I2C master bus (for touch controller).
 static constexpr gpio_num_t GO_I2C_MASTER_SCL_IO = GPIO_NUM_6;

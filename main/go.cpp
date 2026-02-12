@@ -1,6 +1,7 @@
 
 #include <stdint.h>
 
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "esp_event.h"
@@ -13,6 +14,8 @@
 
 #include "button_service.h"
 #include "go_constants.h"
+
+#include "sps30.h"
 
 enum class State {
   Idle = 0,
@@ -59,10 +62,49 @@ static const char* state_name(State s) {
   return "UNKNOWN";
 }
 
+static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_handle_t* out) {
+  if (out == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  *out = nullptr;
+
+  gpio_config_t io_conf = {};
+  io_conf.intr_type = GPIO_INTR_DISABLE;
+  io_conf.mode = GPIO_MODE_OUTPUT;
+  io_conf.pin_bit_mask = (1ULL << GO_PM_POWER_GPIO);
+  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+  esp_err_t err = gpio_config(&io_conf);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  (void)gpio_set_level(GO_PM_POWER_GPIO, GO_PM_POWER_ON_LEVEL);
+  sleep_ms(GO_SPS30_POWER_STABILIZE_DELAY_MS);
+
+  sps30_config_t cfg = {};
+  cfg.i2c_address = GO_SPS30_I2C_ADDRESS;
+  cfg.i2c_clock_speed = GO_SPS30_I2C_CLOCK_SPEED_HZ;
+
+  err = sps30_init(bus_handle, &cfg, out);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = sps30_start_measurement(*out);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  sleep_ms(GO_SPS30_WARMUP_DELAY_MS);
+  ESP_LOGI(GO_TAG, "SPS30 ready");
+  return ESP_OK;
+}
+
 class GoController {
  public:
-  GoController(ButtonService* buttons, QueueHandle_t input_queue)
-      : buttons_(buttons), input_queue_(input_queue) {
+  GoController(ButtonService* buttons, QueueHandle_t input_queue, sps30_handle_t sps30)
+      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30) {
   }
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload* p) {
@@ -78,10 +120,12 @@ class GoController {
       if (ev == ButtonService::Event::ShortPress) {
         GoInputEvent e;
         e.type = GoInputEventType::ButtonShort;
+        ESP_LOGI("Event", "Button short");
         (void)xQueueSend(input_queue_, &e, 0);
       } else if (ev == ButtonService::Event::LongPress) {
         GoInputEvent e;
         e.type = GoInputEventType::ButtonLong;
+        ESP_LOGI("Event", "Button long");
         (void)xQueueSend(input_queue_, &e, 0);
       }
       return;
@@ -91,6 +135,7 @@ class GoController {
       if (p->id == GO_TRACKING_TOUCH_ID && ev == ButtonService::Event::LongPress) {
         GoInputEvent e;
         e.type = GoInputEventType::TouchLong;
+        ESP_LOGI("Event", "Touch long");
         (void)xQueueSend(input_queue_, &e, 0);
       }
       return;
@@ -109,6 +154,7 @@ class GoController {
  private:
   ButtonService* buttons_ = nullptr;
   QueueHandle_t input_queue_ = nullptr;
+  sps30_handle_t sps30_ = nullptr;
 
   State _state = State::Idle;
   uint32_t _state_enter_ms = 0;
@@ -268,8 +314,19 @@ class GoController {
   // ----- Placeholder implementations (fill in later) -----
 
   void _idle_measure_and_display(void) {
-    // TODO: take measurements then display.
-    ESP_LOGD(GO_TAG, "idle: measure + display");
+    if (sps30_ == nullptr) {
+      ESP_LOGW(GO_TAG, "SPS30 not initialized");
+      return;
+    }
+
+    sps30_measurement_t m;
+    const esp_err_t err = sps30_read_measurement(sps30_, &m);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "SPS30 read failed: %s", esp_err_to_name(err));
+      return;
+    }
+
+    ESP_LOGI(GO_TAG, "pm25: %.1f", (double)m.pm2p5_mass);
   }
 
   void _inactive_enter_deep_sleep(void) {
@@ -306,6 +363,19 @@ class GoController {
 
   bool _tracking_step(void) {
     // TODO: measure -> save to storage -> display.
+    if (sps30_ == nullptr) {
+      ESP_LOGW(GO_TAG, "SPS30 not initialized");
+      return true;
+    }
+
+    sps30_measurement_t m;
+    const esp_err_t err = sps30_read_measurement(sps30_, &m);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "SPS30 read failed: %s", esp_err_to_name(err));
+      return true;
+    }
+
+    ESP_LOGI(GO_TAG, "pm25: %.1f", (double)m.pm2p5_mass);
     return true;
   }
 
@@ -369,13 +439,22 @@ extern "C" void app_main(void) {
   ButtonService buttons(bus_handle, bcfg);
   ESP_ERROR_CHECK(buttons.init());
 
+  sps30_handle_t sps30 = nullptr;
+  {
+    const esp_err_t err = init_sps30_sensor(bus_handle, &sps30);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "SPS30 init failed: %s", esp_err_to_name(err));
+      sps30 = nullptr;
+    }
+  }
+
   QueueHandle_t input_queue = xQueueCreate((UBaseType_t)GO_INPUT_QUEUE_LEN, sizeof(GoInputEvent));
   if (input_queue == nullptr) {
     ESP_LOGE(GO_TAG, "input queue create failed");
     return;
   }
 
-  GoController go(&buttons, input_queue);
+  GoController go(&buttons, input_queue, sps30);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
