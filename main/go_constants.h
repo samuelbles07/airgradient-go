@@ -5,6 +5,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_types.h"
+#include "driver/uart.h"
 
 static constexpr char GO_TAG[] = "GO";
 
@@ -18,6 +19,13 @@ static constexpr uint32_t GO_INPUT_QUEUE_LEN = 16;
 
 // Keep disabled in skeleton to avoid accidental sleep-lock during development.
 static constexpr bool GO_ENABLE_DEEP_SLEEP = false;
+
+// GPS (UART).
+static constexpr uart_port_t GO_GPS_UART_PORT = UART_NUM_1;
+static constexpr gpio_num_t GO_GPS_UART_TX_GPIO = GPIO_NUM_11;
+static constexpr gpio_num_t GO_GPS_UART_RX_GPIO = GPIO_NUM_12;
+static constexpr int GO_GPS_UART_BAUD = 9600;
+static constexpr bool GO_GPS_LOG_RAW_NMEA = false;
 
 // SPS30 (PM sensor).
 static constexpr gpio_num_t GO_PM_POWER_GPIO = GPIO_NUM_26;

@@ -1,6 +1,9 @@
 
 #include <stdint.h>
 
+#include <inttypes.h>
+#include <stdio.h>
+
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -13,6 +16,7 @@
 #include "freertos/task.h"
 
 #include "button_service.h"
+#include "gps_service.h"
 #include "go_constants.h"
 
 #include "sps30.h"
@@ -101,10 +105,41 @@ static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_han
   return ESP_OK;
 }
 
+static void log_gps_data(const GPSService::Data& d) {
+  if (!d.has_sentence) {
+    ESP_LOGI(GO_TAG, "gps: no sentence");
+    return;
+  }
+
+  char time_buf[32];
+  time_buf[0] = '\0';
+  if (d.utc.date_valid && d.utc.time_valid) {
+    (void)snprintf(time_buf, sizeof(time_buf), "%04d-%02d-%02d %02d:%02d:%02dZ", d.utc.year,
+                   d.utc.month, d.utc.day, d.utc.hour, d.utc.min, d.utc.sec);
+  } else if (d.utc.time_valid) {
+    (void)snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02dZ", d.utc.hour, d.utc.min, d.utc.sec);
+  } else {
+    (void)snprintf(time_buf, sizeof(time_buf), "--");
+  }
+
+  if (d.fix_valid) {
+    ESP_LOGI(GO_TAG,
+             "gps: fix=1 q=%d sats=%d lat=%.6f lon=%.6f time=%s last_sentence=%" PRIu64 "ms",
+             d.fix_quality, d.satellites, d.latitude_deg, d.longitude_deg, time_buf,
+             d.last_sentence_ms);
+  } else {
+    ESP_LOGI(GO_TAG, "gps: fix=0 q=%d sats=%d time=%s last_sentence=%" PRIu64 "ms", d.fix_quality,
+             d.satellites, time_buf, d.last_sentence_ms);
+  }
+}
+
 class GoController {
  public:
-  GoController(ButtonService* buttons, QueueHandle_t input_queue, sps30_handle_t sps30)
-      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30) {
+  GoController(ButtonService* buttons,
+               QueueHandle_t input_queue,
+               sps30_handle_t sps30,
+               GPSService* gps)
+      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps) {
   }
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload* p) {
@@ -155,6 +190,7 @@ class GoController {
   ButtonService* buttons_ = nullptr;
   QueueHandle_t input_queue_ = nullptr;
   sps30_handle_t sps30_ = nullptr;
+  GPSService* gps_ = nullptr;
 
   State _state = State::Idle;
   uint32_t _state_enter_ms = 0;
@@ -327,6 +363,11 @@ class GoController {
     }
 
     ESP_LOGI(GO_TAG, "pm25: %.1f", (double)m.pm2p5_mass);
+
+    if (gps_ != nullptr) {
+      GPSService::Data d = gps_->get();
+      log_gps_data(d);
+    }
   }
 
   void _inactive_enter_deep_sleep(void) {
@@ -376,6 +417,11 @@ class GoController {
     }
 
     ESP_LOGI(GO_TAG, "pm25: %.1f", (double)m.pm2p5_mass);
+
+    if (gps_ != nullptr) {
+      GPSService::Data d = gps_->get();
+      log_gps_data(d);
+    }
     return true;
   }
 
@@ -439,6 +485,28 @@ extern "C" void app_main(void) {
   ButtonService buttons(bus_handle, bcfg);
   ESP_ERROR_CHECK(buttons.init());
 
+  static GPSService gps;
+  GPSService* gps_ptr = nullptr;
+  {
+    GPSService::Config gps_cfg;
+    gps_cfg.uart_num = GO_GPS_UART_PORT;
+    gps_cfg.rx_pin = GO_GPS_UART_RX_GPIO;
+    gps_cfg.tx_pin = GO_GPS_UART_TX_GPIO;
+    gps_cfg.baud_rate = GO_GPS_UART_BAUD;
+    gps_cfg.log_raw_nmea = GO_GPS_LOG_RAW_NMEA;
+
+    esp_err_t err = gps.init(gps_cfg);
+    if (err == ESP_OK) {
+      err = gps.start();
+    }
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "GPS init/start failed: %s", esp_err_to_name(err));
+      gps_ptr = nullptr;
+    } else {
+      gps_ptr = &gps;
+    }
+  }
+
   sps30_handle_t sps30 = nullptr;
   {
     const esp_err_t err = init_sps30_sensor(bus_handle, &sps30);
@@ -454,7 +522,7 @@ extern "C" void app_main(void) {
     return;
   }
 
-  GoController go(&buttons, input_queue, sps30);
+  GoController go(&buttons, input_queue, sps30, gps_ptr);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
