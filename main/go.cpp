@@ -2,11 +2,13 @@
 #include <stdint.h>
 
 #include "esp_mac.h"
-#include "string"
+#include <string>
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
 #include <fcntl.h>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -17,7 +19,9 @@
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+#include "esp_http_client.h"
 #include "esp_console.h"
+#include "cJSON.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "freertos/FreeRTOS.h"
@@ -117,6 +121,79 @@ static uint16_t pm25_to_x10(float ugm3) {
     return 65534;
   }
   return (uint16_t)v;
+}
+
+static bool utc_to_epoch_ms(const GPSService::UtcTime &utc, uint64_t *out_ms) {
+  if (out_ms == nullptr) {
+    return false;
+  }
+  *out_ms = 0;
+  if (!utc.date_valid || !utc.time_valid) {
+    return false;
+  }
+
+  // Basic range validation.
+  if (utc.year < 1970 || utc.month < 1 || utc.month > 12 || utc.day < 1 || utc.day > 31) {
+    return false;
+  }
+  if (utc.hour < 0 || utc.hour > 23 || utc.min < 0 || utc.min > 59 || utc.sec < 0 || utc.sec > 59) {
+    return false;
+  }
+
+  // days_from_civil() (Howard Hinnant) adapted for UTC.
+  int y = utc.year;
+  unsigned m = (unsigned)utc.month;
+  unsigned d = (unsigned)utc.day;
+
+  if (m <= 2) {
+    y -= 1;
+  }
+
+  int era = 0;
+  if (y >= 0) {
+    era = y / 400;
+  } else {
+    era = (y - 399) / 400;
+  }
+
+  const unsigned yoe = (unsigned)(y - era * 400);
+
+  unsigned mp = 0;
+  if (m > 2) {
+    mp = m - 3;
+  } else {
+    mp = m + 9;
+  }
+  const unsigned doy = (153U * mp + 2U) / 5U + d - 1U;
+
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  const int64_t days = (int64_t)era * 146097 + (int64_t)doe - 719468;
+
+  const int64_t sec = days * 86400LL + (int64_t)utc.hour * 3600LL + (int64_t)utc.min * 60LL +
+                      (int64_t)utc.sec;
+  if (sec < 0) {
+    return false;
+  }
+  *out_ms = (uint64_t)sec * 1000ULL;
+  return true;
+}
+
+static void format_rfc3339_utc(uint64_t epoch_ms, char *out, size_t out_len) {
+  if (out == nullptr || out_len == 0) {
+    return;
+  }
+  out[0] = '\0';
+
+  const time_t sec = (time_t)(epoch_ms / 1000ULL);
+  struct tm tm_utc;
+  memset(&tm_utc, 0, sizeof(tm_utc));
+  if (gmtime_r(&sec, &tm_utc) == nullptr) {
+    (void)snprintf(out, out_len, "1970-01-01T00:00:00Z");
+    return;
+  }
+
+  (void)snprintf(out, out_len, "%04d-%02d-%02dT%02d:%02d:%02dZ", tm_utc.tm_year + 1900,
+                 tm_utc.tm_mon + 1, tm_utc.tm_mday, tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
 }
 
 static const char *state_name(State s) {
@@ -258,6 +335,35 @@ static bool wifi_connect(const std::string &sn) {
 
 void wifi_disconnect() { g_wifiManager.disconnect(true); }
 
+static bool post_request(const std::string &sn, const std::string &data) {
+  esp_http_client_config_t config = {};
+  char url[96] = {0};
+  (void)snprintf(url, sizeof(url), "http://hw.airgradient.com/sensors/airgradient:%s/measures",
+                 sn.c_str());
+  config.url = url;
+  config.method = HTTP_METHOD_POST;
+  config.cert_pem = nullptr;
+  config.timeout_ms = 10000;
+
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == nullptr) {
+    ESP_LOGW(GO_TAG, "http client init failed");
+    return false;
+  }
+
+  esp_http_client_set_header(client, "Content-Type", "application/json");
+  esp_http_client_set_post_field(client, data.c_str(), data.length());
+
+  if (esp_http_client_perform(client) != ESP_OK) {
+    esp_http_client_cleanup(client);
+    return false;
+  }
+
+  const int responseCode = esp_http_client_get_status_code(client);
+  esp_http_client_cleanup(client);
+  return (responseCode == 200 || responseCode == 201);
+}
+
 static void initConsole() {
   fflush(stdout);
   fsync(fileno(stdout));
@@ -326,7 +432,9 @@ public:
     }
 
     if (p->source == ButtonService::Source::Touch) {
+      // ESP_LOGI(GO_TAG, "Touch");
       if (p->id == GO_TRACKING_TOUCH_ID && ev == ButtonService::Event::LongPress) {
+      // if (ev == ButtonService::Event::LongPress) {
         GoInputEvent e;
         e.type = GoInputEventType::TouchLong;
         ESP_LOGI(GO_TAG, "event: touch long");
@@ -363,6 +471,7 @@ private:
   bool _sync_started = false;
   bool _tracking_started = false;
   std::string _serial_number;
+  bool _sync_wifi_connected = false;
 
   void _init(void) {
     tracking_session_id_ = RTC_TRACKING_SESSION_ID;
@@ -627,10 +736,17 @@ private:
 
   void _sync_begin(void) {
     ESP_LOGI(GO_TAG, "sync: begin");
-    wifi_connect(_serial_number);
+    _sync_wifi_connected = wifi_connect(_serial_number);
+    if (!_sync_wifi_connected) {
+      ESP_LOGW(GO_TAG, "sync: wifi connect failed");
+    }
   }
 
   bool _sync_step(void) {
+    if (!_sync_wifi_connected) {
+      ESP_LOGW(GO_TAG, "sync: wifi not connected");
+      return true;
+    }
     if (storage_ == nullptr) {
       ESP_LOGW(GO_TAG, "sync: storage not configured");
       return true;
@@ -641,6 +757,7 @@ private:
     }
 
     const TickType_t to = pdMS_TO_TICKS(GO_SYNC_CMD_TIMEOUT_MS);
+    const uint64_t interval_ms = (uint64_t)GO_TRACKING_SLEEP_INTERVAL_S * 1000ULL;
 
     uint32_t total = 0;
     esp_err_t err = storage_->get_count_sync(&total, to);
@@ -649,60 +766,222 @@ private:
       return true;
     }
 
-    ESP_LOGI(GO_TAG, "sync: records=%" PRIu32, total);
     if (total == 0) {
+      ESP_LOGI(GO_TAG, "sync: nothing to send");
       return true;
     }
 
-    static NandStorageService::Record buf[GO_SYNC_READ_CHUNK];
-    uint32_t idx = 0;
-    bool read_ok = true;
-    while (idx < total) {
-      uint32_t nread = 0;
-      uint32_t want = total - idx;
-      if (want > GO_SYNC_READ_CHUNK) {
-        want = GO_SYNC_READ_CHUNK;
-      }
+    ESP_LOGI(GO_TAG, "sync: total records=%" PRIu32, total);
 
-      err = storage_->read_range_sync(idx, buf, want, &nread, to);
-      if (err != ESP_OK && nread == 0) {
-        ESP_LOGW(GO_TAG, "sync: read_range failed at idx=%" PRIu32 ": %s", idx,
-                 esp_err_to_name(err));
-        read_ok = false;
+    uint32_t idx = 0;
+    bool ok_all = true;
+
+    while (idx < total) {
+      NandStorageService::Record first;
+      uint32_t nread = 0;
+      err = storage_->read_range_sync(idx, &first, 1, &nread, to);
+      if (err != ESP_OK || nread != 1) {
+        ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx, esp_err_to_name(err));
+        ok_all = false;
         break;
       }
 
-      for (uint32_t i = 0; i < nread; ++i) {
-        const NandStorageService::Record &r = buf[i];
-        const bool gps_valid = (r.latitude_e7 != INT32_MIN && r.longitude_e7 != INT32_MIN);
-        const double lat = gps_valid ? ((double)r.latitude_e7 / 10000000.0) : 0.0;
-        const double lon = gps_valid ? ((double)r.longitude_e7 / 10000000.0) : 0.0;
-        const bool pm_valid = (r.pm25_ugm3_x10 != 0xFFFF);
-        const double pm25 = pm_valid ? ((double)r.pm25_ugm3_x10 / 10.0) : 0.0;
+      const uint32_t route_id = first.id;
+      ESP_LOGI(GO_TAG, "sync: route=%" PRIu32, route_id);
 
-        if (gps_valid && pm_valid) {
-          ESP_LOGI(GO_TAG, "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=%.7f lon=%.7f",
-                   r.id, r.timestamp_ms, pm25, lat, lon);
-        } else if (pm_valid) {
-          ESP_LOGI(GO_TAG, "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=-- lon=--", r.id,
-                   r.timestamp_ms, pm25);
-        } else {
-          ESP_LOGI(GO_TAG, "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=-- lat=%s lon=%s", r.id,
-                   r.timestamp_ms, gps_valid ? "OK" : "--", gps_valid ? "OK" : "--");
+      // Find the first non-zero GPS timestamp for this route so we can backfill earlier
+      // records that have timestamp_ms==0.
+      bool have_anchor = false;
+      uint32_t anchor_idx = 0;
+      uint64_t anchor_ts_ms = 0;
+      {
+        uint32_t probe = idx;
+        while (probe < total) {
+          NandStorageService::Record r;
+          nread = 0;
+          err = storage_->read_range_sync(probe, &r, 1, &nread, to);
+          if (err != ESP_OK || nread != 1) {
+            ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", probe,
+                     esp_err_to_name(err));
+            ok_all = false;
+            break;
+          }
+          if (r.id != route_id) {
+            break;
+          }
+          if (r.timestamp_ms != 0) {
+            have_anchor = true;
+            anchor_idx = probe;
+            anchor_ts_ms = r.timestamp_ms;
+            break;
+          }
+          probe += 1;
         }
       }
 
-      idx += nread;
-      if (err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "sync: read stopped early at idx=%" PRIu32 " (%s)", idx,
-                 esp_err_to_name(err));
-        read_ok = false;
+      if (!ok_all) {
+        break;
+      }
+      if (!have_anchor) {
+        // No GPS time ever became valid for this route; we can't synthesize timestamps.
+        ESP_LOGW(GO_TAG, "sync: route=%" PRIu32 " has no timestamps; keeping log", route_id);
+        ok_all = false;
+        break;
+      }
+
+      uint64_t last_ts_ms = 0;
+
+      while (idx < total) {
+        NandStorageService::Record batch[GO_SYNC_BATCH_MAX];
+        uint64_t ts_ms[GO_SYNC_BATCH_MAX];
+        uint32_t n = 0;
+
+        while (n < GO_SYNC_BATCH_MAX && idx < total) {
+          NandStorageService::Record r;
+          nread = 0;
+          err = storage_->read_range_sync(idx, &r, 1, &nread, to);
+          if (err != ESP_OK || nread != 1) {
+            ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx,
+                     esp_err_to_name(err));
+            ok_all = false;
+            break;
+          }
+
+          if (r.id != route_id) {
+            break;
+          }
+
+          const uint32_t abs_idx = idx;
+          uint64_t t = r.timestamp_ms;
+          if (t == 0) {
+            if (last_ts_ms != 0) {
+              t = last_ts_ms + interval_ms;
+            } else if (abs_idx < anchor_idx) {
+              const uint32_t diff = anchor_idx - abs_idx;
+              const uint64_t backfill = (uint64_t)diff * interval_ms;
+              if (anchor_ts_ms <= backfill) {
+                t = 0;
+              } else {
+                t = anchor_ts_ms - backfill;
+              }
+            } else {
+              // abs_idx==anchor_idx should have had a non-zero timestamp.
+              t = 0;
+            }
+          }
+          if (t == 0) {
+            ESP_LOGW(GO_TAG, "sync: route=%" PRIu32 " idx=%" PRIu32 " timestamp unresolved",
+                     route_id, abs_idx);
+            ok_all = false;
+            break;
+          }
+          last_ts_ms = t;
+
+          batch[n] = r;
+          ts_ms[n] = t;
+          n += 1;
+          idx += 1;
+        }
+
+        if (!ok_all) {
+          break;
+        }
+        if (n == 0) {
+          break;
+        }
+
+        // Stable sort by timestamp ascending.
+        for (uint32_t i = 1; i < n; ++i) {
+          const NandStorageService::Record r = batch[i];
+          const uint64_t t = ts_ms[i];
+          uint32_t j = i;
+          while (j > 0 && ts_ms[j - 1] > t) {
+            batch[j] = batch[j - 1];
+            ts_ms[j] = ts_ms[j - 1];
+            j -= 1;
+          }
+          batch[j] = r;
+          ts_ms[j] = t;
+        }
+
+        // Build JSON payload.
+        cJSON *root = cJSON_CreateObject();
+        cJSON *arr = cJSON_CreateArray();
+        cJSON_AddItemToObject(root, "measures", arr);
+
+        for (uint32_t i = 0; i < n; ++i) {
+          cJSON *m = cJSON_CreateObject();
+          char date[32];
+          format_rfc3339_utc(ts_ms[i], date, sizeof(date));
+          cJSON_AddStringToObject(m, "date", date);
+
+          if (batch[i].latitude_e7 == INT32_MIN || batch[i].longitude_e7 == INT32_MIN) {
+            cJSON_AddNullToObject(m, "lat");
+            cJSON_AddNullToObject(m, "lng");
+          } else {
+            cJSON_AddNumberToObject(m, "lat", (double)batch[i].latitude_e7 / 10000000.0);
+            cJSON_AddNumberToObject(m, "lng", (double)batch[i].longitude_e7 / 10000000.0);
+          }
+
+          if (batch[i].pm25_ugm3_x10 == 0xFFFF) {
+            cJSON_AddNullToObject(m, "pm02");
+          } else {
+            cJSON_AddNumberToObject(m, "pm02", (double)batch[i].pm25_ugm3_x10 / 10.0);
+          }
+
+          cJSON_AddNumberToObject(m, "route", (double)batch[i].id);
+          cJSON_AddItemToArray(arr, m);
+        }
+
+        char *json = cJSON_PrintUnformatted(root);
+        std::string payload;
+        if (json != nullptr) {
+          payload.assign(json);
+          cJSON_free(json);
+        }
+        cJSON_Delete(root);
+
+        if (payload.empty()) {
+          ESP_LOGW(GO_TAG, "sync: json build failed");
+          ok_all = false;
+          break;
+        }
+
+        ESP_LOGI(GO_TAG, "sync: post route=%" PRIu32 " n=%" PRIu32, route_id, n);
+        if (!post_request(_serial_number, payload)) {
+          ESP_LOGW(GO_TAG, "sync: post failed");
+          ok_all = false;
+          break;
+        }
+
+        if (n < GO_SYNC_BATCH_MAX) {
+          // Might be end of this route; check next record.
+          if (idx < total) {
+            NandStorageService::Record next;
+            nread = 0;
+            err = storage_->read_range_sync(idx, &next, 1, &nread, to);
+            if (err != ESP_OK || nread != 1) {
+              ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx,
+                       esp_err_to_name(err));
+              ok_all = false;
+              break;
+            }
+            if (next.id != route_id) {
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+      }
+
+      if (!ok_all) {
         break;
       }
     }
 
-    if (!read_ok) {
-      ESP_LOGW(GO_TAG, "sync: not clearing log due to read error");
+    if (!ok_all) {
+      ESP_LOGW(GO_TAG, "sync: failed; keeping log");
       return true;
     }
 
@@ -719,7 +998,10 @@ private:
   void _sync_end(void) {
     // TODO: stop Wi-Fi / cleanup.
     ESP_LOGI(GO_TAG, "sync: end");
-    wifi_disconnect();
+    if (_sync_wifi_connected) {
+      wifi_disconnect();
+      _sync_wifi_connected = false;
+    }
   }
 
   void _tracking_begin(void) {
@@ -786,7 +1068,13 @@ private:
 
     NandStorageService::Record r;
     r.id = tracking_session_id_;
-    r.timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    {
+      uint64_t epoch_ms = 0;
+      if (gps_ok) {
+        (void)utc_to_epoch_ms(d.utc, &epoch_ms);
+      }
+      r.timestamp_ms = epoch_ms;
+    }
     r.pm25_ugm3_x10 = pm25_to_x10(pm25);
 
     if (gps_ok && d.fix_valid) {
