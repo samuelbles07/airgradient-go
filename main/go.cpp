@@ -1209,7 +1209,7 @@ private:
     ESP_LOGI(GO_TAG, "sync: total records=%" PRIu32, total);
 
     uint32_t idx = 0;
-    bool ok_all = true;
+    bool any_route_sent = false;
 
     while (idx < total) {
       NandStorageService::Record first;
@@ -1217,75 +1217,83 @@ private:
       err = storage_->read_range_sync(idx, &first, 1, &nread, to);
       if (err != ESP_OK || nread != 1) {
         ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx, esp_err_to_name(err));
-        ok_all = false;
-        break;
+        ESP_LOGW(GO_TAG, "sync: failed; keeping log");
+        return true;
       }
 
       const uint32_t route_id = first.id;
-      ESP_LOGI(GO_TAG, "sync: route=%" PRIu32, route_id);
+      uint32_t route_start = idx;
+      uint32_t route_end = route_start;
+
+      while (route_end < total) {
+        NandStorageService::Record r;
+        nread = 0;
+        err = storage_->read_range_sync(route_end, &r, 1, &nread, to);
+        if (err != ESP_OK || nread != 1) {
+          ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", route_end,
+                   esp_err_to_name(err));
+          ESP_LOGW(GO_TAG, "sync: failed; keeping log");
+          return true;
+        }
+        if (r.id != route_id) {
+          break;
+        }
+        route_end += 1;
+      }
+
+      ESP_LOGI(GO_TAG, "sync: route=%" PRIu32 " records=%" PRIu32, route_id,
+               route_end - route_start);
+
+      bool route_ok = true;
 
       // Find the first non-zero GPS timestamp for this route so we can backfill earlier
       // records that have timestamp_ms==0.
       bool have_anchor = false;
       uint32_t anchor_idx = 0;
       uint64_t anchor_ts_ms = 0;
-      {
-        uint32_t probe = idx;
-        while (probe < total) {
-          NandStorageService::Record r;
-          nread = 0;
-          err = storage_->read_range_sync(probe, &r, 1, &nread, to);
-          if (err != ESP_OK || nread != 1) {
-            ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", probe,
-                     esp_err_to_name(err));
-            ok_all = false;
-            break;
-          }
-          if (r.id != route_id) {
-            break;
-          }
-          if (r.timestamp_ms != 0) {
-            have_anchor = true;
-            anchor_idx = probe;
-            anchor_ts_ms = r.timestamp_ms;
-            break;
-          }
-          probe += 1;
+      for (uint32_t probe = route_start; probe < route_end; ++probe) {
+        NandStorageService::Record r;
+        nread = 0;
+        err = storage_->read_range_sync(probe, &r, 1, &nread, to);
+        if (err != ESP_OK || nread != 1) {
+          ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", probe,
+                   esp_err_to_name(err));
+          ESP_LOGW(GO_TAG, "sync: failed; keeping log");
+          return true;
+        }
+        if (r.timestamp_ms != 0) {
+          have_anchor = true;
+          anchor_idx = probe;
+          anchor_ts_ms = r.timestamp_ms;
+          break;
         }
       }
 
-      if (!ok_all) {
-        break;
-      }
       if (!have_anchor) {
         // No GPS time ever became valid for this route; we can't synthesize timestamps.
-        ESP_LOGW(GO_TAG, "sync: route=%" PRIu32 " has no timestamps; keeping log", route_id);
-        ok_all = false;
-        break;
+        ESP_LOGW(GO_TAG, "sync: route=%" PRIu32 " has no timestamps; skipping", route_id);
+        route_ok = false;
       }
 
       uint64_t last_ts_ms = 0;
+      uint32_t cur = route_start;
 
-      while (idx < total) {
+      while (route_ok && cur < route_end) {
         NandStorageService::Record batch[GO_SYNC_BATCH_MAX];
         uint64_t ts_ms[GO_SYNC_BATCH_MAX];
         uint32_t n = 0;
 
-        while (n < GO_SYNC_BATCH_MAX && idx < total) {
+        while (n < GO_SYNC_BATCH_MAX && cur < route_end) {
           NandStorageService::Record r;
           nread = 0;
-          err = storage_->read_range_sync(idx, &r, 1, &nread, to);
+          err = storage_->read_range_sync(cur, &r, 1, &nread, to);
           if (err != ESP_OK || nread != 1) {
-            ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx, esp_err_to_name(err));
-            ok_all = false;
-            break;
+            ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", cur, esp_err_to_name(err));
+            ESP_LOGW(GO_TAG, "sync: failed; keeping log");
+            return true;
           }
 
-          if (r.id != route_id) {
-            break;
-          }
-
-          const uint32_t abs_idx = idx;
+          const uint32_t abs_idx = cur;
           uint64_t t = r.timestamp_ms;
           if (t == 0) {
             if (last_ts_ms != 0) {
@@ -1306,7 +1314,7 @@ private:
           if (t == 0) {
             ESP_LOGW(GO_TAG, "sync: route=%" PRIu32 " idx=%" PRIu32 " timestamp unresolved",
                      route_id, abs_idx);
-            ok_all = false;
+            route_ok = false;
             break;
           }
           last_ts_ms = t;
@@ -1314,10 +1322,10 @@ private:
           batch[n] = r;
           ts_ms[n] = t;
           n += 1;
-          idx += 1;
+          cur += 1;
         }
 
-        if (!ok_all) {
+        if (!route_ok) {
           break;
         }
         if (n == 0) {
@@ -1377,45 +1385,28 @@ private:
 
         if (payload.empty()) {
           ESP_LOGW(GO_TAG, "sync: json build failed");
-          ok_all = false;
+          route_ok = false;
           break;
         }
 
         ESP_LOGI(GO_TAG, "sync: post route=%" PRIu32 " n=%" PRIu32, route_id, n);
         if (!post_request(_serial_number, payload)) {
-          ESP_LOGW(GO_TAG, "sync: post failed");
-          ok_all = false;
+          ESP_LOGW(GO_TAG, "sync: post failed; skipping route=%" PRIu32, route_id);
+          route_ok = false;
           break;
         }
-
-        if (n < GO_SYNC_BATCH_MAX) {
-          // Might be end of this route; check next record.
-          if (idx < total) {
-            NandStorageService::Record next;
-            nread = 0;
-            err = storage_->read_range_sync(idx, &next, 1, &nread, to);
-            if (err != ESP_OK || nread != 1) {
-              ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx,
-                       esp_err_to_name(err));
-              ok_all = false;
-              break;
-            }
-            if (next.id != route_id) {
-              break;
-            }
-          } else {
-            break;
-          }
-        }
       }
 
-      if (!ok_all) {
-        break;
+      if (route_ok) {
+        any_route_sent = true;
+        ESP_LOGI(GO_TAG, "sync: route=%" PRIu32 " ok", route_id);
       }
+
+      idx = route_end;
     }
 
-    if (!ok_all) {
-      ESP_LOGW(GO_TAG, "sync: failed; keeping log");
+    if (!any_route_sent) {
+      ESP_LOGW(GO_TAG, "sync: no routes sent; keeping log");
       return true;
     }
 
