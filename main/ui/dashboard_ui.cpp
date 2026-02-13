@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "ui/u8g2_canvas.h"
 
 extern "C" {
@@ -304,6 +307,35 @@ esp_err_t DashboardUI::set_syncing(bool syncing) {
   }
   build_status_();
   return ESP_OK;
+}
+
+esp_err_t DashboardUI::clear_and_sleep() {
+  // Use a full basemap update to fully whiten the panel (writes both RAM buffers)
+  // and to restore deterministic panel state before sleeping.
+  static uint8_t white[ssd1680x::panels::GDEY0213B74::BUFFER_SIZE];
+  static bool inited = false;
+  if (!inited) {
+    memset(white, 0xFF, sizeof(white));
+    inited = true;
+  }
+
+  esp_err_t err = epd_.ensure_init_full();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = epd_.set_basemap_bw(white, sizeof(white));
+  if (err != ESP_OK) {
+    // Fallback to simple clear if basemap update fails.
+    err = epd_.clear_white();
+    if (err != ESP_OK) {
+      return err;
+    }
+  }
+
+  // // Some panels deassert BUSY slightly early; give the physical update time to settle.
+  // vTaskDelay(pdMS_TO_TICKS(4000));
+  return epd_.deep_sleep();
 }
 
 }  // namespace ui

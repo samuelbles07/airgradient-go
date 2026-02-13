@@ -24,6 +24,10 @@ class DashboardUI {
   // Force a full refresh (basemap + values). Useful after deep sleep.
   esp_err_t full_refresh();
 
+  // Clear the full display to white and put the panel into deep sleep.
+  // Intended for system shutdown.
+  esp_err_t clear_and_sleep();
+
   esp_err_t set_time_hm(int hh, int mm);
   esp_err_t set_pm25_ugm3(float v);
   esp_err_t set_co2_ppm(int v);

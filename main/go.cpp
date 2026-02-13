@@ -50,6 +50,7 @@ enum class State {
   Inactive,
   Sync,
   Tracking,
+  Shutdown,
 };
 
 RTC_DATA_ATTR static State RTC_LAST_STATE = State::Idle;
@@ -62,6 +63,7 @@ static bool is_valid_rtc_state(State s) {
   case State::Inactive:
   case State::Sync:
   case State::Tracking:
+  case State::Shutdown:
     return true;
   }
   return false;
@@ -212,6 +214,8 @@ static const char *state_name(State s) {
     return "SYNC";
   case State::Tracking:
     return "TRACKING";
+  case State::Shutdown:
+    return "SHUTDOWN";
   }
   return "UNKNOWN";
 }
@@ -575,6 +579,7 @@ private:
   uint32_t _last_idle_measure_ms = 0;
   bool _sync_started = false;
   bool _tracking_started = false;
+  bool _shutdown_started = false;
   std::string _serial_number;
   bool _sync_wifi_connected = false;
   bool charger_vbus_seen_ = false;
@@ -676,6 +681,9 @@ private:
     case State::Tracking:
       _state_tracking(in);
       break;
+    case State::Shutdown:
+      _state_shutdown(in);
+      break;
     }
   }
 
@@ -692,12 +700,16 @@ private:
       _last_idle_measure_ms = 0;
       _sync_started = false;
       _tracking_started = false;
+      _shutdown_started = false;
     }
     if (_state == State::Sync) {
       _sync_started = false;
     }
     if (_state == State::Tracking) {
       _tracking_started = false;
+    }
+    if (_state == State::Shutdown) {
+      _shutdown_started = false;
     }
   }
 
@@ -719,7 +731,8 @@ private:
       return;
     }
     if (in.button_long) {
-      // TODO: For later shutdown
+      _transition(State::Shutdown);
+      return;
     }
 
 #if NO_INACTIVE_NO_SLEEP == 0
@@ -973,6 +986,103 @@ private:
       _tracking_end();
       _tracking_enter_sleep();
       return;
+    }
+  }
+
+  void _state_shutdown(const Inputs &in) {
+    (void)in;
+    if (_shutdown_started) {
+      return;
+    }
+    _shutdown_started = true;
+    _shutdown_now();
+  }
+
+  void _shutdown_now(void) {
+    ESP_LOGI(GO_TAG, "shutdown: begin");
+
+    // Ensure we have time to complete slow steps.
+    reset_ext_watchdog();
+    last_wdt_reset_ms_ = now_ms();
+
+    // Stop button processing/interrupts so we don't fight I2C while shutting down.
+    if (buttons_ != nullptr) {
+      const esp_err_t err = buttons_->pre_light_sleep();
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "shutdown: buttons pre_light_sleep failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    // Best-effort: disconnect Wi-Fi if it was enabled.
+    if (_sync_wifi_connected) {
+      wifi_disconnect();
+      _sync_wifi_connected = false;
+    }
+
+    // Flush queued storage writes.
+    if (storage_ != nullptr && storage_->is_ready()) {
+      const TickType_t to = pdMS_TO_TICKS(GO_NAND_CMD_TIMEOUT_MS);
+      const esp_err_t err = storage_->flush_sync(to);
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "shutdown: storage flush failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    // Clear the display and put the panel to sleep.
+    if (ui_ != nullptr) {
+      ESP_LOGI(GO_TAG, "shutdown: display clear");
+      const uint32_t t0 = now_ms();
+      const esp_err_t err = ui_->clear_and_sleep();
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "shutdown: ui clear_and_sleep failed: %s", esp_err_to_name(err));
+      }
+      ESP_LOGI(GO_TAG, "shutdown: display clear done (%" PRIu32 "ms)", now_ms() - t0);
+    } 
+    // else if (epd_ != nullptr) {
+    //   ESP_LOGI(GO_TAG, "shutdown: display clear (raw)");
+    //   const uint32_t t0 = now_ms();
+    //   esp_err_t err = epd_->ensure_init_full();
+    //   if (err != ESP_OK) {
+    //     ESP_LOGW(GO_TAG, "shutdown: epd ensure_init_full failed: %s", esp_err_to_name(err));
+    //   } else {
+    //     err = epd_->clear_white();
+    //     if (err != ESP_OK) {
+    //       ESP_LOGW(GO_TAG, "shutdown: epd clear_white failed: %s", esp_err_to_name(err));
+    //     }
+    //     sleep_ms(4000);
+    //     err = epd_->deep_sleep();
+    //     if (err != ESP_OK) {
+    //       ESP_LOGW(GO_TAG, "shutdown: epd deep_sleep failed: %s", esp_err_to_name(err));
+    //     }
+    //   }
+    //   ESP_LOGI(GO_TAG, "shutdown: display clear done (%" PRIu32 "ms)", now_ms() - t0);
+    // }
+
+    // Cut PM sensor rail.
+    (void)gpio_set_level(GO_PM_POWER_GPIO, 0);
+
+    // Stop GPS task/UART.
+    if (gps_ != nullptr) {
+      const esp_err_t err = gps_->stop();
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "shutdown: gps stop failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    // Enter ship mode: BATFET disconnects and system powers off.
+    if (charger_ == nullptr) {
+      ESP_LOGW(GO_TAG, "shutdown: charger not available; ship mode skipped");
+    } else {
+      const esp_err_t err = charger_->enter_ship_mode();
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "shutdown: enter_ship_mode failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    // esp_deep_sleep_start();
+    // If power doesn't cut immediately, stay halted.
+    while (true) {
+      sleep_ms(1000);
     }
   }
 
@@ -1340,7 +1450,7 @@ private:
 
   void _tracking_begin(void) {
     // TODO: initialize tracking cycle.
-    ESP_LOGI(GO_TAG, "tracking: begin (stub)");
+    ESP_LOGI(GO_TAG, "tracking: begin route=%05" PRIu32, tracking_session_id_);
   }
 
   bool _tracking_step(void) {
