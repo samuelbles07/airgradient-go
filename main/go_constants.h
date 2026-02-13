@@ -37,6 +37,15 @@ static constexpr gpio_num_t GO_WDT_GPIO = GPIO_NUM_2;
 static constexpr uint32_t GO_WDT_RESET_PULSE_MS = 20;
 static constexpr uint32_t GO_WDT_RESET_INTERVAL_MS = 60 * 1000;
 
+// NAND storage.
+static constexpr gpio_num_t GO_NAND_CS_GPIO = GPIO_NUM_4;
+static constexpr int GO_NAND_CLOCK_SPEED_HZ = 10 * 1000 * 1000;
+static constexpr char GO_NAND_MOUNT_PATH[] = "/nand";
+static constexpr char GO_NAND_RECORDS_PATH[] = "/nand/log.bin";
+static constexpr uint32_t GO_NAND_READY_WAIT_RETRIES = 100;
+static constexpr uint32_t GO_NAND_READY_WAIT_DELAY_MS = 50;
+static constexpr uint32_t GO_NAND_CMD_TIMEOUT_MS = 5000;
+
 // EPD display (SPI + SSD1680x panel).
 static constexpr spi_host_device_t GO_SPI_HOST = SPI2_HOST;
 static constexpr gpio_num_t GO_SPI_MOSI_GPIO = GPIO_NUM_25;

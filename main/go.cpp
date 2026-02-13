@@ -2,6 +2,8 @@
 #include <stdint.h>
 
 #include <inttypes.h>
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include "driver/gpio.h"
@@ -23,6 +25,7 @@
 
 #include "button_service.h"
 #include "gps_service.h"
+#include "nand_storage_service.h"
 #include "go_constants.h"
 
 #include "gdey0213b74.h"
@@ -41,6 +44,7 @@ enum class State {
 };
 
 RTC_DATA_ATTR static State RTC_LAST_STATE = State::Idle;
+RTC_DATA_ATTR static uint32_t RTC_TRACKING_SESSION_ID = 0;
 
 static bool is_valid_rtc_state(State s) {
   switch (s) {
@@ -92,6 +96,25 @@ static void reset_ext_watchdog(void) {
   (void)gpio_set_level(GO_WDT_GPIO, 1);
   sleep_ms(GO_WDT_RESET_PULSE_MS);
   (void)gpio_set_level(GO_WDT_GPIO, 0);
+}
+
+static int32_t deg_to_e7(double deg) {
+  return (int32_t)llround(deg * 10000000.0);
+}
+
+static uint16_t pm25_to_x10(float ugm3) {
+  if (!(ugm3 >= 0.0f)) {
+    return 0xFFFF;
+  }
+
+  const int v = (int)lroundf(ugm3 * 10.0f);
+  if (v < 0) {
+    return 0;
+  }
+  if (v > 65534) {
+    return 65534;
+  }
+  return (uint16_t)v;
 }
 
 static const char *state_name(State s) {
@@ -245,8 +268,14 @@ class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, sps30_handle_t sps30,
                GPSService *gps, ui::DashboardUI *ui, ssd1680x::panels::GDEY0213B74 *epd,
-               uint32_t last_wdt_reset_ms)
-      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps), ui_(ui), epd_(epd),
+               NandStorageService *storage, uint32_t last_wdt_reset_ms)
+      : buttons_(buttons),
+        input_queue_(input_queue),
+        sps30_(sps30),
+        gps_(gps),
+        ui_(ui),
+        epd_(epd),
+        storage_(storage),
         last_wdt_reset_ms_(last_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
@@ -300,8 +329,10 @@ private:
   GPSService *gps_ = nullptr;
   ui::DashboardUI *ui_ = nullptr;
   ssd1680x::panels::GDEY0213B74 *epd_ = nullptr;
+  NandStorageService *storage_ = nullptr;
 
   uint32_t last_wdt_reset_ms_ = 0;
+  uint32_t tracking_session_id_ = 0;
 
   State _state = State::Idle;
   uint32_t _state_enter_ms = 0;
@@ -310,6 +341,8 @@ private:
   bool _tracking_started = false;
 
   void _init(void) {
+    tracking_session_id_ = RTC_TRACKING_SESSION_ID;
+
     State last = RTC_LAST_STATE;
     if (!is_valid_rtc_state(last)) {
       last = State::Idle;
@@ -334,6 +367,12 @@ private:
     ESP_LOGI(GO_TAG, "wake cause=%d last=%s initial=%s", (int)cause, state_name(last),
              state_name(initial));
     _transition(initial);
+  }
+
+  void _start_new_tracking_session(void) {
+    RTC_TRACKING_SESSION_ID += 1;
+    tracking_session_id_ = RTC_TRACKING_SESSION_ID;
+    ESP_LOGI(GO_TAG, "tracking session id=%" PRIu32, tracking_session_id_);
   }
 
   Inputs _poll_inputs(void) {
@@ -399,6 +438,7 @@ private:
 
     // Transitions from diagram.
     if (in.touch_long) {
+      _start_new_tracking_session();
       _transition(State::Tracking);
       return;
     }
@@ -612,7 +652,47 @@ private:
         ESP_LOGW(GO_TAG, "epd deep_sleep failed: %s", esp_err_to_name(err));
       }
     }
+
+    _tracking_write_record(pm25, gps_ok, d);
     return true;
+  }
+
+  void _tracking_write_record(float pm25, bool gps_ok, const GPSService::Data &d) {
+    if (storage_ == nullptr) {
+      return;
+    }
+    if (!storage_->is_ready()) {
+      ESP_LOGW(GO_TAG, "storage not ready; skip write");
+      return;
+    }
+
+    NandStorageService::Record r;
+    r.id = tracking_session_id_;
+    r.timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    r.pm25_ugm3_x10 = pm25_to_x10(pm25);
+
+    if (gps_ok && d.fix_valid) {
+      r.latitude_e7 = deg_to_e7(d.latitude_deg);
+      r.longitude_e7 = deg_to_e7(d.longitude_deg);
+    } else {
+      r.latitude_e7 = INT32_MIN;
+      r.longitude_e7 = INT32_MIN;
+    }
+
+    const TickType_t to = pdMS_TO_TICKS(GO_NAND_CMD_TIMEOUT_MS);
+    esp_err_t err = storage_->enqueue_record(r, true, to);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "storage enqueue failed: %s", esp_err_to_name(err));
+      return;
+    }
+
+#if NO_INACTIVE_NO_SLEEP == 0
+    err = storage_->flush_sync(to);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "storage flush failed: %s", esp_err_to_name(err));
+      return;
+    }
+#endif
   }
 
   void _tracking_end(void) {
@@ -698,6 +778,37 @@ extern "C" void app_main(void) {
   buscfg.max_transfer_sz = GO_SPI_MAX_TRANSFER_SZ;
   ESP_ERROR_CHECK(spi_bus_initialize(GO_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
+  static NandStorageService storage;
+  NandStorageService *storage_ptr = nullptr;
+  {
+    NandStorageService::Config scfg;
+    scfg.spi_host = GO_SPI_HOST;
+    scfg.cs_pin = GO_NAND_CS_GPIO;
+    scfg.clock_speed_hz = GO_NAND_CLOCK_SPEED_HZ;
+    scfg.mount_path = GO_NAND_MOUNT_PATH;
+    scfg.records_path = GO_NAND_RECORDS_PATH;
+
+    esp_err_t err = storage.init(scfg);
+    if (err == ESP_OK) {
+      err = storage.start();
+    }
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "storage init/start failed: %s", esp_err_to_name(err));
+      storage_ptr = nullptr;
+    } else {
+      storage_ptr = &storage;
+      for (uint32_t i = 0; i < GO_NAND_READY_WAIT_RETRIES; ++i) {
+        if (storage.is_ready()) {
+          break;
+        }
+        sleep_ms(GO_NAND_READY_WAIT_DELAY_MS);
+      }
+      if (!storage.is_ready()) {
+        ESP_LOGW(GO_TAG, "storage not ready yet; will start logging when ready");
+      }
+    }
+  }
+
   ButtonService::Config bcfg;
   bcfg.physical_gpio = GO_BUTTON_PHYSICAL_GPIO;
   bcfg.cap_alert_gpio = GO_TOUCH_ALERT_GPIO;
@@ -762,7 +873,8 @@ extern "C" void app_main(void) {
     return;
   }
 
-  GoController go(&buttons, input_queue, sps30, gps_ptr, ui_ptr, epd_ptr, wdt_last_reset_ms);
+  GoController go(&buttons, input_queue, sps30, gps_ptr, ui_ptr, epd_ptr, storage_ptr,
+                  wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
