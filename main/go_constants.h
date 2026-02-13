@@ -103,11 +103,13 @@ static constexpr bool GO_TOUCH_REQUIRED = false;
 static constexpr uint32_t GO_BUTTON_DEBOUNCE_MS = 200;
 static constexpr uint32_t GO_BUTTON_LONG_PRESS_MS = 2500;
 
-// Choose a single touch channel for tracking toggles (0=CS1, 1=CS2, 2=CS3).
-static constexpr uint8_t GO_TRACKING_TOUCH_ID = 0;
-static constexpr uint8_t GO_TOUCH_ENABLE_MASK = 0x01;
-static constexpr uint8_t GO_TOUCH_INTERRUPT_ENABLE_MASK = 0x01;
+// Touch button mapping (CAP1203): 0=CS1 (Right), 1=CS2 (Left), 2=CS3 (Enter).
+static constexpr uint8_t GO_TOUCH_RIGHT_ID = 0;
+static constexpr uint8_t GO_TOUCH_LEFT_ID = 1;
+static constexpr uint8_t GO_TOUCH_ENTER_ID = 2;
+static constexpr uint8_t GO_TOUCH_ENABLE_MASK = 0x07;
+static constexpr uint8_t GO_TOUCH_INTERRUPT_ENABLE_MASK = 0x07;
 static constexpr bool GO_TOUCH_CALIBRATE = true;
-static constexpr uint8_t GO_TOUCH_CALIBRATE_MASK = 0x01;
+static constexpr uint8_t GO_TOUCH_CALIBRATE_MASK = 0x07;
 
 #endif // AIRGRADIENT_GO_MAIN_GO_CONSTANTS_H

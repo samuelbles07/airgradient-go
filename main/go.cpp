@@ -70,13 +70,17 @@ static bool is_valid_rtc_state(State s) {
 struct Inputs {
   bool button_short = false;
   bool button_long = false;
-  bool touch_long = false;
+  bool touch_right_long = false;
+  bool touch_left_long = false;
+  bool touch_enter_long = false;
 };
 
 enum class GoInputEventType : uint8_t {
   ButtonShort = 1,
   ButtonLong = 2,
-  TouchLong = 3,
+  TouchRightLong = 3,
+  TouchLeftLong = 4,
+  TouchEnterLong = 5,
 };
 
 struct GoInputEvent {
@@ -517,11 +521,22 @@ public:
     }
 
     if (p->source == ButtonService::Source::Touch) {
-      // ESP_LOGI(GO_TAG, "Touch");
-      if (p->id == GO_TRACKING_TOUCH_ID && ev == ButtonService::Event::LongPress) {
-        GoInputEvent e;
-        e.type = GoInputEventType::TouchLong;
-        ESP_LOGI(GO_TAG, "event: touch long");
+      if (ev != ButtonService::Event::LongPress) {
+        return;
+      }
+
+      GoInputEvent e;
+      if (p->id == GO_TOUCH_RIGHT_ID) {
+        e.type = GoInputEventType::TouchRightLong;
+        ESP_LOGI(GO_TAG, "event: touch right long");
+        (void)xQueueSend(input_queue_, &e, 0);
+      } else if (p->id == GO_TOUCH_LEFT_ID) {
+        e.type = GoInputEventType::TouchLeftLong;
+        ESP_LOGI(GO_TAG, "event: touch left long");
+        (void)xQueueSend(input_queue_, &e, 0);
+      } else if (p->id == GO_TOUCH_ENTER_ID) {
+        e.type = GoInputEventType::TouchEnterLong;
+        ESP_LOGI(GO_TAG, "event: touch enter long");
         (void)xQueueSend(input_queue_, &e, 0);
       }
       return;
@@ -617,11 +632,34 @@ private:
         in.button_short = true;
       } else if (ev.type == GoInputEventType::ButtonLong) {
         in.button_long = true;
-      } else if (ev.type == GoInputEventType::TouchLong) {
-        in.touch_long = true;
+      } else if (ev.type == GoInputEventType::TouchRightLong) {
+        in.touch_right_long = true;
+      } else if (ev.type == GoInputEventType::TouchLeftLong) {
+        in.touch_left_long = true;
+      } else if (ev.type == GoInputEventType::TouchEnterLong) {
+        in.touch_enter_long = true;
       }
     }
     return in;
+  }
+
+  void _clear_tracking_logs(void) {
+    if (storage_ == nullptr) {
+      ESP_LOGW(GO_TAG, "clear logs: storage not configured");
+      return;
+    }
+    if (!storage_->is_ready()) {
+      ESP_LOGW(GO_TAG, "clear logs: storage not ready");
+      return;
+    }
+
+    const TickType_t to = pdMS_TO_TICKS(GO_NAND_CMD_TIMEOUT_MS);
+    const esp_err_t err = storage_->clear_sync(to);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "clear logs: failed: %s", esp_err_to_name(err));
+      return;
+    }
+    ESP_LOGI(GO_TAG, "clear logs: ok");
   }
 
   void _step(const Inputs &in) {
@@ -667,14 +705,21 @@ private:
     _kick_watchdogs_if_needed();
 
     // Transitions from diagram.
-    if (in.touch_long) {
+    if (in.touch_right_long) {
       _start_new_tracking_session();
       _transition(State::Tracking);
       return;
     }
-    if (in.button_long) {
+    if (in.touch_left_long) {
       _transition(State::Sync);
       return;
+    }
+    if (in.touch_enter_long) {
+      _clear_tracking_logs();
+      return;
+    }
+    if (in.button_long) {
+      // TODO: For later shutdown
     }
 
 #if NO_INACTIVE_NO_SLEEP == 0
@@ -899,7 +944,7 @@ private:
   void _state_tracking(const Inputs &in) {
     // TRACKING: boot -> measure -> save -> display -> sleep.
     // Diagram: touch (long) toggles back to IDLE.
-    if (in.touch_long) {
+    if (in.touch_right_long) {
 #if NO_INACTIVE_NO_SLEEP == 1
       // In dev mode we don't reboot between modes, but TRACKING deep-sleeps the panel after
       // full_refresh(). Ensure we wake and restore basemap prerequisites before switching to
