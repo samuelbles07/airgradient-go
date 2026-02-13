@@ -508,6 +508,17 @@ private:
     // TRACKING: boot -> measure -> save -> display -> sleep.
     // Diagram: touch (long) toggles back to IDLE.
     if (in.touch_long) {
+#if NO_INACTIVE_NO_SLEEP == 1
+      // In dev mode we don't reboot between modes, but TRACKING deep-sleeps the panel after
+      // full_refresh(). Ensure we wake and restore basemap prerequisites before switching to
+      // IDLE (which uses partial refresh).
+      if (ui_ != nullptr) {
+        const esp_err_t err = ui_->full_refresh();
+        if (err != ESP_OK) {
+          ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(err));
+        }
+      }
+#endif
       _transition(State::Idle);
       return;
     }
