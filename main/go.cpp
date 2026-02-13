@@ -591,17 +591,100 @@ private:
 
   void _sync_begin(void) {
     // TODO: start Wi-Fi and prepare to send stored data.
-    ESP_LOGI(GO_TAG, "sync: begin (stub)");
+    ESP_LOGI(GO_TAG, "sync: begin");
   }
 
   bool _sync_step(void) {
-    // TODO: advance sync state machine; return true when finished.
+    if (storage_ == nullptr) {
+      ESP_LOGW(GO_TAG, "sync: storage not configured");
+      return true;
+    }
+    if (!storage_->is_ready()) {
+      ESP_LOGW(GO_TAG, "sync: storage not ready");
+      return true;
+    }
+
+    const TickType_t to = pdMS_TO_TICKS(GO_SYNC_CMD_TIMEOUT_MS);
+
+    uint32_t total = 0;
+    esp_err_t err = storage_->get_count_sync(&total, to);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "sync: get_count failed: %s", esp_err_to_name(err));
+      return true;
+    }
+
+    ESP_LOGI(GO_TAG, "sync: records=%" PRIu32, total);
+    if (total == 0) {
+      return true;
+    }
+
+    static NandStorageService::Record buf[GO_SYNC_READ_CHUNK];
+    uint32_t idx = 0;
+    bool read_ok = true;
+    while (idx < total) {
+      uint32_t nread = 0;
+      uint32_t want = total - idx;
+      if (want > GO_SYNC_READ_CHUNK) {
+        want = GO_SYNC_READ_CHUNK;
+      }
+
+      err = storage_->read_range_sync(idx, buf, want, &nread, to);
+      if (err != ESP_OK && nread == 0) {
+        ESP_LOGW(GO_TAG, "sync: read_range failed at idx=%" PRIu32 ": %s", idx,
+                 esp_err_to_name(err));
+        read_ok = false;
+        break;
+      }
+
+      for (uint32_t i = 0; i < nread; ++i) {
+        const NandStorageService::Record &r = buf[i];
+        const bool gps_valid = (r.latitude_e7 != INT32_MIN && r.longitude_e7 != INT32_MIN);
+        const double lat = gps_valid ? ((double)r.latitude_e7 / 10000000.0) : 0.0;
+        const double lon = gps_valid ? ((double)r.longitude_e7 / 10000000.0) : 0.0;
+        const bool pm_valid = (r.pm25_ugm3_x10 != 0xFFFF);
+        const double pm25 = pm_valid ? ((double)r.pm25_ugm3_x10 / 10.0) : 0.0;
+
+        if (gps_valid && pm_valid) {
+          ESP_LOGI(GO_TAG,
+                   "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=%.7f lon=%.7f",
+                   r.id, r.timestamp_ms, pm25, lat, lon);
+        } else if (pm_valid) {
+          ESP_LOGI(GO_TAG, "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=-- lon=--",
+                   r.id, r.timestamp_ms, pm25);
+        } else {
+          ESP_LOGI(GO_TAG,
+                   "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=-- lat=%s lon=%s",
+                   r.id, r.timestamp_ms, gps_valid ? "OK" : "--", gps_valid ? "OK" : "--");
+        }
+      }
+
+      idx += nread;
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "sync: read stopped early at idx=%" PRIu32 " (%s)", idx,
+                 esp_err_to_name(err));
+        read_ok = false;
+        break;
+      }
+    }
+
+    if (!read_ok) {
+      ESP_LOGW(GO_TAG, "sync: not clearing log due to read error");
+      return true;
+    }
+
+    err = storage_->clear_sync(to);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "sync: clear failed: %s", esp_err_to_name(err));
+      return true;
+    }
+
+    ESP_LOGI(GO_TAG, "sync: cleared");
     return true;
   }
 
   void _sync_end(void) {
     // TODO: stop Wi-Fi / cleanup.
-    ESP_LOGI(GO_TAG, "sync: end (stub)");
+    ESP_LOGI(GO_TAG, "sync: end");
   }
 
   void _tracking_begin(void) {

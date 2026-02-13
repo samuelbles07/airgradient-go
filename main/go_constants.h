@@ -23,7 +23,7 @@ static constexpr int GO_IDLE_INACTIVE_TIMEOUT_MS = 60000;
 static constexpr uint32_t GO_INPUT_QUEUE_LEN = 16;
 
 // Tracking sleep interval.
-static constexpr uint32_t GO_TRACKING_SLEEP_INTERVAL_S = 1 * 60;
+static constexpr uint32_t GO_TRACKING_SLEEP_INTERVAL_S = 5;
 
 // GPS (UART).
 static constexpr uart_port_t GO_GPS_UART_PORT = UART_NUM_1;
@@ -45,6 +45,10 @@ static constexpr char GO_NAND_RECORDS_PATH[] = "/nand/log.bin";
 static constexpr uint32_t GO_NAND_READY_WAIT_RETRIES = 100;
 static constexpr uint32_t GO_NAND_READY_WAIT_DELAY_MS = 50;
 static constexpr uint32_t GO_NAND_CMD_TIMEOUT_MS = 5000;
+
+// SYNC behavior.
+static constexpr uint32_t GO_SYNC_READ_CHUNK = 64;
+static constexpr uint32_t GO_SYNC_CMD_TIMEOUT_MS = 5000;
 
 // EPD display (SPI + SSD1680x panel).
 static constexpr spi_host_device_t GO_SPI_HOST = SPI2_HOST;
