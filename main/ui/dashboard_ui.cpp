@@ -63,6 +63,36 @@ esp_err_t DashboardUI::render_static_() {
   return ESP_OK;
 }
 
+void DashboardUI::build_status_() {
+  status_[0] = '\0';
+
+  auto append = [&](const char* s) {
+    if (s == nullptr || s[0] == '\0') {
+      return;
+    }
+    const size_t cur = strlen(status_);
+    const size_t cap = sizeof(status_);
+    if (cur + 1 >= cap) {
+      return;
+    }
+    if (cur != 0) {
+      status_[cur] = ' ';
+      status_[cur + 1] = '\0';
+    }
+    strncat(status_, s, cap - strlen(status_) - 1);
+  };
+
+  if (tracking_) {
+    append("TR");
+  }
+  if (syncing_) {
+    append("SY");
+  }
+  if (gps_fixed_) {
+    append("GF");
+  }
+}
+
 void DashboardUI::render_text_(const Rect& r, uint8_t* buf, size_t len, const char* text, const uint8_t* font,
                                bool centered) {
   if (buf == nullptr || len == 0) {
@@ -79,7 +109,7 @@ void DashboardUI::render_text_(const Rect& r, uint8_t* buf, size_t len, const ch
   if (centered) {
     w.draw_str_centered(TEXT_INSET, 0, r.w - TEXT_INSET, r.h, text);
   } else {
-    w.draw_str(TEXT_INSET, 4, text);
+    w.draw_str(TEXT_INSET, 3, text);
   }
 }
 
@@ -101,13 +131,14 @@ void DashboardUI::render_value_left_(const Rect& r, uint8_t* buf, size_t len, co
 esp_err_t DashboardUI::batch_write_all_() {
   render_text_(CLOCK_R, buf_clock_, sizeof(buf_clock_), clock_, u8g2_font_6x10_tr, false);
   render_text_(PM_VALUE_R, buf_pm_, sizeof(buf_pm_), pm_, u8g2_font_10x20_tn, true);
-  render_text_(CO2_VALUE_R, buf_co2_, sizeof(buf_co2_), co2_, u8g2_font_10x20_tn, true);
-  render_value_left_(TEMP_R, buf_temp_, sizeof(buf_temp_), temp_, u8g2_font_6x10_tr);
-  render_value_left_(HUM_R, buf_hum_, sizeof(buf_hum_), hum_, u8g2_font_6x10_tr);
-  render_value_left_(TVOC_R, buf_tvoc_, sizeof(buf_tvoc_), tvoc_, u8g2_font_6x10_tr);
-  render_value_left_(NOX_R, buf_nox_, sizeof(buf_nox_), nox_, u8g2_font_6x10_tr);
-  render_value_left_(PRES_R, buf_pres_, sizeof(buf_pres_), pres_, u8g2_font_6x10_tr);
-  render_value_left_(ALT_R, buf_alt_, sizeof(buf_alt_), alt_, u8g2_font_6x10_tr);
+  render_text_(STATUS_R, buf_status_, sizeof(buf_status_), status_, u8g2_font_6x10_tr, true);
+  // render_text_(CO2_VALUE_R, buf_co2_, sizeof(buf_co2_), co2_, u8g2_font_10x20_tn, true);
+  // render_value_left_(TEMP_R, buf_temp_, sizeof(buf_temp_), temp_, u8g2_font_6x10_tr);
+  // render_value_left_(HUM_R, buf_hum_, sizeof(buf_hum_), hum_, u8g2_font_6x10_tr);
+  // render_value_left_(TVOC_R, buf_tvoc_, sizeof(buf_tvoc_), tvoc_, u8g2_font_6x10_tr);
+  // render_value_left_(NOX_R, buf_nox_, sizeof(buf_nox_), nox_, u8g2_font_6x10_tr);
+  // render_value_left_(PRES_R, buf_pres_, sizeof(buf_pres_), pres_, u8g2_font_6x10_tr);
+  // render_value_left_(ALT_R, buf_alt_, sizeof(buf_alt_), alt_, u8g2_font_6x10_tr);
 
   esp_err_t err = epd_.partial_begin();
   if (err != ESP_OK) return err;
@@ -116,20 +147,22 @@ esp_err_t DashboardUI::batch_write_all_() {
   if (err != ESP_OK) goto out_err;
   err = epd_.partial_write_bw(PM_VALUE_R.x, PM_VALUE_R.y, PM_VALUE_R.w, PM_VALUE_R.h, buf_pm_, RAW_LEN(PM_VALUE_R));
   if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, buf_co2_, RAW_LEN(CO2_VALUE_R));
+  err = epd_.partial_write_bw(STATUS_R.x, STATUS_R.y, STATUS_R.w, STATUS_R.h, buf_status_, RAW_LEN(STATUS_R));
   if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(TEMP_R.x, TEMP_R.y, TEMP_R.w, TEMP_R.h, buf_temp_, RAW_LEN(TEMP_R));
-  if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(HUM_R.x, HUM_R.y, HUM_R.w, HUM_R.h, buf_hum_, RAW_LEN(HUM_R));
-  if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(TVOC_R.x, TVOC_R.y, TVOC_R.w, TVOC_R.h, buf_tvoc_, RAW_LEN(TVOC_R));
-  if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(NOX_R.x, NOX_R.y, NOX_R.w, NOX_R.h, buf_nox_, RAW_LEN(NOX_R));
-  if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(PRES_R.x, PRES_R.y, PRES_R.w, PRES_R.h, buf_pres_, RAW_LEN(PRES_R));
-  if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(ALT_R.x, ALT_R.y, ALT_R.w, ALT_R.h, buf_alt_, RAW_LEN(ALT_R));
-  if (err != ESP_OK) goto out_err;
+  // err = epd_.partial_write_bw(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, buf_co2_, RAW_LEN(CO2_VALUE_R));
+  // if (err != ESP_OK) goto out_err;
+  // err = epd_.partial_write_bw(TEMP_R.x, TEMP_R.y, TEMP_R.w, TEMP_R.h, buf_temp_, RAW_LEN(TEMP_R));
+  // if (err != ESP_OK) goto out_err;
+  // err = epd_.partial_write_bw(HUM_R.x, HUM_R.y, HUM_R.w, HUM_R.h, buf_hum_, RAW_LEN(HUM_R));
+  // if (err != ESP_OK) goto out_err;
+  // err = epd_.partial_write_bw(TVOC_R.x, TVOC_R.y, TVOC_R.w, TVOC_R.h, buf_tvoc_, RAW_LEN(TVOC_R));
+  // if (err != ESP_OK) goto out_err;
+  // err = epd_.partial_write_bw(NOX_R.x, NOX_R.y, NOX_R.w, NOX_R.h, buf_nox_, RAW_LEN(NOX_R));
+  // if (err != ESP_OK) goto out_err;
+  // err = epd_.partial_write_bw(PRES_R.x, PRES_R.y, PRES_R.w, PRES_R.h, buf_pres_, RAW_LEN(PRES_R));
+  // if (err != ESP_OK) goto out_err;
+  // err = epd_.partial_write_bw(ALT_R.x, ALT_R.y, ALT_R.w, ALT_R.h, buf_alt_, RAW_LEN(ALT_R));
+  // if (err != ESP_OK) goto out_err;
 
   return epd_.partial_end_update();
 
@@ -152,15 +185,19 @@ void DashboardUI::render_full_frame_() {
 
   c.set_font(u8g2_font_10x20_tn);
   c.draw_str_centered(PM_VALUE_R.x, PM_VALUE_R.y, PM_VALUE_R.w, PM_VALUE_R.h, pm_);
-  c.draw_str_centered(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, co2_);
+  // c.draw_str_centered(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, co2_);
 
+  // Status indicators.
   c.set_font(u8g2_font_6x10_tr);
-  c.draw_str(TEMP_R.x + TEXT_INSET, TEMP_R.y + 2, temp_);
-  c.draw_str(HUM_R.x + TEXT_INSET, HUM_R.y + 2, hum_);
-  c.draw_str(TVOC_R.x + TEXT_INSET, TVOC_R.y + 2, tvoc_);
-  c.draw_str(NOX_R.x + TEXT_INSET, NOX_R.y + 2, nox_);
-  c.draw_str(PRES_R.x + TEXT_INSET, PRES_R.y + 2, pres_);
-  c.draw_str(ALT_R.x + TEXT_INSET, ALT_R.y + 2, alt_);
+  c.draw_str_centered(STATUS_R.x, STATUS_R.y, STATUS_R.w, STATUS_R.h, status_);
+
+  // c.set_font(u8g2_font_6x10_tr);
+  // c.draw_str(TEMP_R.x + TEXT_INSET, TEMP_R.y + 2, temp_);
+  // c.draw_str(HUM_R.x + TEXT_INSET, HUM_R.y + 2, hum_);
+  // c.draw_str(TVOC_R.x + TEXT_INSET, TVOC_R.y + 2, tvoc_);
+  // c.draw_str(NOX_R.x + TEXT_INSET, NOX_R.y + 2, nox_);
+  // c.draw_str(PRES_R.x + TEXT_INSET, PRES_R.y + 2, pres_);
+  // c.draw_str(ALT_R.x + TEXT_INSET, ALT_R.y + 2, alt_);
 }
 
 esp_err_t DashboardUI::refresh() {
@@ -242,6 +279,30 @@ esp_err_t DashboardUI::set_pressure_hpa(int v) {
 
 esp_err_t DashboardUI::set_altitude_m(int v) {
   snprintf(alt_, sizeof(alt_), "%d M", v);
+  return ESP_OK;
+}
+
+esp_err_t DashboardUI::set_gps_fixed(bool fixed) {
+  gps_fixed_ = fixed;
+  build_status_();
+  return ESP_OK;
+}
+
+esp_err_t DashboardUI::set_tracking(bool tracking) {
+  tracking_ = tracking;
+  if (tracking_) {
+    syncing_ = false;
+  }
+  build_status_();
+  return ESP_OK;
+}
+
+esp_err_t DashboardUI::set_syncing(bool syncing) {
+  syncing_ = syncing;
+  if (syncing_) {
+    tracking_ = false;
+  }
+  build_status_();
   return ESP_OK;
 }
 

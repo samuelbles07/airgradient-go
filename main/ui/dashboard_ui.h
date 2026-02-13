@@ -34,6 +34,14 @@ class DashboardUI {
   esp_err_t set_pressure_hpa(int v);
   esp_err_t set_altitude_m(int v);
 
+  // Small bottom-of-screen indicators.
+  // - gps_fixed: "GF"
+  // - tracking: "TR"
+  // - syncing: "SY"
+  esp_err_t set_gps_fixed(bool fixed);
+  esp_err_t set_tracking(bool tracking);
+  esp_err_t set_syncing(bool syncing);
+
  private:
   struct Rect {
     int x;
@@ -55,6 +63,9 @@ class DashboardUI {
   static constexpr Rect CLOCK_R = {0, 0, 48, 16};
   static constexpr Rect PM_VALUE_R = {0, 32, 128, 32};
   static constexpr Rect CO2_VALUE_R = {0, 80, 128, 32};
+
+  // Bottom status indicator area (small text).
+  static constexpr Rect STATUS_R = {64, H - 16, 64, 16};
 
   static constexpr int GRID_Y = 124;
   static constexpr int ROW_H = 32;
@@ -78,6 +89,7 @@ class DashboardUI {
   static constexpr size_t CLOCK_BUFSZ = (size_t)(CLOCK_R.w / 8) * (size_t)CLOCK_R.h;
   static constexpr size_t PM_BUFSZ = (size_t)(PM_VALUE_R.w / 8) * (size_t)PM_VALUE_R.h;
   static constexpr size_t CO2_BUFSZ = (size_t)(CO2_VALUE_R.w / 8) * (size_t)CO2_VALUE_R.h;
+  static constexpr size_t STATUS_BUFSZ = (size_t)(STATUS_R.w / 8) * (size_t)STATUS_R.h;
 
   static constexpr size_t TEMP_BUFSZ = (size_t)(TEMP_R.w / 8) * (size_t)TILE_PAD_H;
   static constexpr size_t HUM_BUFSZ = (size_t)(HUM_R.w / 8) * (size_t)TILE_PAD_H;
@@ -100,6 +112,7 @@ class DashboardUI {
   uint8_t buf_nox_[NOX_BUFSZ];
   uint8_t buf_pres_[PRES_BUFSZ];
   uint8_t buf_alt_[ALT_BUFSZ];
+  uint8_t buf_status_[STATUS_BUFSZ];
 
   char clock_[8] = {0};
   char pm_[16] = {0};
@@ -111,11 +124,17 @@ class DashboardUI {
   char pres_[16] = {0};
   char alt_[16] = {0};
 
+  char status_[16] = {0};
+  bool gps_fixed_ = false;
+  bool tracking_ = false;
+  bool syncing_ = false;
+
   uint32_t refresh_count_ = 0;
   static constexpr uint32_t FAST_BASEMAP_EVERY = 4;    // every 20s at 5s cadence
   static constexpr uint32_t FULL_BASEMAP_EVERY = 24;   // every 2 min at 5s cadence
 
   esp_err_t render_static_();
+  void build_status_();
   void render_text_(const Rect& r, uint8_t* buf, size_t len, const char* text, const uint8_t* font, bool centered);
   void render_value_left_(const Rect& r, uint8_t* buf, size_t len, const char* text, const uint8_t* font);
   esp_err_t batch_write_all_();

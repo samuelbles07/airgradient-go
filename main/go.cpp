@@ -647,6 +647,9 @@ private:
       // full_refresh(). Ensure we wake and restore basemap prerequisites before switching to
       // IDLE (which uses partial refresh).
       if (ui_ != nullptr) {
+        (void)ui_->set_tracking(false);
+        (void)ui_->set_syncing(false);
+        (void)ui_->set_gps_fixed(false);
         const esp_err_t err = ui_->full_refresh();
         if (err != ESP_OK) {
           ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(err));
@@ -697,6 +700,9 @@ private:
     }
 
     if (ui_ != nullptr) {
+      (void)ui_->set_tracking(false);
+      (void)ui_->set_syncing(false);
+      (void)ui_->set_gps_fixed(false);
       (void)ui_->set_pm25_ugm3(pm25);
       if (gps_ok && d.utc.time_valid) {
         (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
@@ -736,6 +742,22 @@ private:
 
   void _sync_begin(void) {
     ESP_LOGI(GO_TAG, "sync: begin");
+
+    if (ui_ != nullptr) {
+      (void)ui_->set_tracking(false);
+      (void)ui_->set_syncing(true);
+      bool gf = false;
+      if (gps_ != nullptr) {
+        const GPSService::Data d = gps_->get();
+        gf = d.fix_valid;
+      }
+      (void)ui_->set_gps_fixed(gf);
+      const esp_err_t ui_err = ui_->refresh();
+      if (ui_err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
+      }
+    }
+
     _sync_wifi_connected = wifi_connect(_serial_number);
     if (!_sync_wifi_connected) {
       ESP_LOGW(GO_TAG, "sync: wifi connect failed");
@@ -1002,6 +1024,16 @@ private:
       wifi_disconnect();
       _sync_wifi_connected = false;
     }
+
+    if (ui_ != nullptr) {
+      (void)ui_->set_syncing(false);
+      (void)ui_->set_tracking(false);
+      (void)ui_->set_gps_fixed(false);
+      const esp_err_t ui_err = ui_->refresh();
+      if (ui_err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
+      }
+    }
   }
 
   void _tracking_begin(void) {
@@ -1035,6 +1067,9 @@ private:
     }
 
     if (ui_ != nullptr) {
+      (void)ui_->set_tracking(true);
+      (void)ui_->set_syncing(false);
+      (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
       (void)ui_->set_pm25_ugm3(pm25);
       if (gps_ok && d.utc.time_valid) {
         (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
