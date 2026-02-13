@@ -61,8 +61,14 @@ void WiFiManager::init() {
   // Initialize the underlying TCP/IP stack
   ESP_ERROR_CHECK(esp_netif_init());
 
-  // Initialize the event loop
-  ESP_ERROR_CHECK(esp_event_loop_create_default());
+  // // Initialize the event loop
+  // ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+  // Event loop
+  ret = esp_event_loop_create_default();
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    ESP_ERROR_CHECK(ret);
+  }
 
   // Generate default AP name if not set
   if (_apName.empty()) {
@@ -557,20 +563,20 @@ bool WiFiManager::setupWiFi() {
 bool WiFiManager::startSTA() {
   WM_LOGD("Starting STA mode");
 
-  wifi_config_t wifi_config = {
-      .sta =
-          {
-              .ssid = "testing",
-              .password = "11223344",
-              .threshold =
-                  {
-                      .authmode = WIFI_AUTH_WPA2_PSK,
-                  },
-          },
-  };
+  // wifi_config_t wifi_config = {
+  //     .sta =
+  //         {
+  //             .ssid = "testing",
+  //             .password = "11223344",
+  //             .threshold =
+  //                 {
+  //                     .authmode = WIFI_AUTH_WPA2_PSK,
+  //                 },
+  //         },
+  // };
 
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+  // ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
   ESP_ERROR_CHECK(esp_wifi_start());
 
   // Trigger connection attempt with saved credentials
@@ -823,7 +829,6 @@ void WiFiManager::updateState() {
 }
 
 bool WiFiManager::getWiFiIsSaved() const {
-  return true;
   wifi_config_t wifi_config;
   esp_err_t ret = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
 

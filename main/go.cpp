@@ -1,6 +1,8 @@
 
 #include <stdint.h>
 
+#include "esp_mac.h"
+#include "string"
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
@@ -27,6 +29,7 @@
 #include "gps_service.h"
 #include "nand_storage_service.h"
 #include "go_constants.h"
+#include "WiFiManager.h"
 
 #include "gdey0213b74.h"
 #include "ui/dashboard_ui.h"
@@ -45,6 +48,7 @@ enum class State {
 
 RTC_DATA_ATTR static State RTC_LAST_STATE = State::Idle;
 RTC_DATA_ATTR static uint32_t RTC_TRACKING_SESSION_ID = 0;
+static WiFiManager g_wifiManager;
 
 static bool is_valid_rtc_state(State s) {
   switch (s) {
@@ -98,9 +102,7 @@ static void reset_ext_watchdog(void) {
   (void)gpio_set_level(GO_WDT_GPIO, 0);
 }
 
-static int32_t deg_to_e7(double deg) {
-  return (int32_t)llround(deg * 10000000.0);
-}
+static int32_t deg_to_e7(double deg) { return (int32_t)llround(deg * 10000000.0); }
 
 static uint16_t pm25_to_x10(float ugm3) {
   if (!(ugm3 >= 0.0f)) {
@@ -229,6 +231,33 @@ static esp_err_t init_display(ui::DashboardUI **ui_out, ssd1680x::panels::GDEY02
   return ESP_OK;
 }
 
+static std::string buildSerialNumber() {
+  uint8_t mac_address[6];
+  esp_err_t err = esp_read_mac(mac_address, ESP_MAC_WIFI_STA);
+  if (err != ESP_OK) {
+    ESP_LOGE(GO_TAG, "Failed to get MAC address (%s)", esp_err_to_name(err));
+    return {};
+  }
+
+  char result[13] = {0};
+  snprintf(result, sizeof(result), "%02x%02x%02x%02x%02x%02x", mac_address[0], mac_address[1],
+           mac_address[2], mac_address[3], mac_address[4], mac_address[5]);
+  std::string sn = std::string(result);
+
+  return sn;
+}
+
+static bool wifi_connect(const std::string &sn) {
+  std::string ssid = std::string("airgradient-") + sn;
+  if (g_wifiManager.autoConnect(ssid.c_str(), "cleanair") == false) {
+    ESP_LOGE(GO_TAG, "Failed connect to WiFi");
+    return false;
+  }
+  return true;
+}
+
+void wifi_disconnect() { g_wifiManager.disconnect(true); }
+
 static void initConsole() {
   fflush(stdout);
   fsync(fileno(stdout));
@@ -269,14 +298,8 @@ public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, sps30_handle_t sps30,
                GPSService *gps, ui::DashboardUI *ui, ssd1680x::panels::GDEY0213B74 *epd,
                NandStorageService *storage, uint32_t last_wdt_reset_ms)
-      : buttons_(buttons),
-        input_queue_(input_queue),
-        sps30_(sps30),
-        gps_(gps),
-        ui_(ui),
-        epd_(epd),
-        storage_(storage),
-        last_wdt_reset_ms_(last_wdt_reset_ms) {}
+      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps), ui_(ui), epd_(epd),
+        storage_(storage), last_wdt_reset_ms_(last_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
     if (p == nullptr) {
@@ -339,9 +362,11 @@ private:
   uint32_t _last_idle_measure_ms = 0;
   bool _sync_started = false;
   bool _tracking_started = false;
+  std::string _serial_number;
 
   void _init(void) {
     tracking_session_id_ = RTC_TRACKING_SESSION_ID;
+    _serial_number = buildSerialNumber();
 
     State last = RTC_LAST_STATE;
     if (!is_valid_rtc_state(last)) {
@@ -601,8 +626,8 @@ private:
   }
 
   void _sync_begin(void) {
-    // TODO: start Wi-Fi and prepare to send stored data.
     ESP_LOGI(GO_TAG, "sync: begin");
+    wifi_connect(_serial_number);
   }
 
   bool _sync_step(void) {
@@ -656,16 +681,14 @@ private:
         const double pm25 = pm_valid ? ((double)r.pm25_ugm3_x10 / 10.0) : 0.0;
 
         if (gps_valid && pm_valid) {
-          ESP_LOGI(GO_TAG,
-                   "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=%.7f lon=%.7f",
+          ESP_LOGI(GO_TAG, "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=%.7f lon=%.7f",
                    r.id, r.timestamp_ms, pm25, lat, lon);
         } else if (pm_valid) {
-          ESP_LOGI(GO_TAG, "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=-- lon=--",
-                   r.id, r.timestamp_ms, pm25);
+          ESP_LOGI(GO_TAG, "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=%.1f lat=-- lon=--", r.id,
+                   r.timestamp_ms, pm25);
         } else {
-          ESP_LOGI(GO_TAG,
-                   "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=-- lat=%s lon=%s",
-                   r.id, r.timestamp_ms, gps_valid ? "OK" : "--", gps_valid ? "OK" : "--");
+          ESP_LOGI(GO_TAG, "sync rec id=%" PRIu32 " ts=%" PRIu64 " pm25=-- lat=%s lon=%s", r.id,
+                   r.timestamp_ms, gps_valid ? "OK" : "--", gps_valid ? "OK" : "--");
         }
       }
 
@@ -696,6 +719,7 @@ private:
   void _sync_end(void) {
     // TODO: stop Wi-Fi / cleanup.
     ESP_LOGI(GO_TAG, "sync: end");
+    wifi_disconnect();
   }
 
   void _tracking_begin(void) {
