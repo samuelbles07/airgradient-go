@@ -30,6 +30,9 @@
 
 #include "sps30.h"
 
+// NOTE: Temporary constants
+#define NO_INACTIVE_NO_SLEEP 1
+
 enum class State {
   Idle = 0,
   Inactive,
@@ -243,14 +246,8 @@ public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, sps30_handle_t sps30,
                GPSService *gps, ui::DashboardUI *ui, ssd1680x::panels::GDEY0213B74 *epd,
                uint32_t last_wdt_reset_ms)
-      : buttons_(buttons),
-        input_queue_(input_queue),
-        sps30_(sps30),
-        gps_(gps),
-        ui_(ui),
-        epd_(epd),
-        last_wdt_reset_ms_(last_wdt_reset_ms) {
-  }
+      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps), ui_(ui), epd_(epd),
+        last_wdt_reset_ms_(last_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
     if (p == nullptr) {
@@ -409,6 +406,8 @@ private:
       _transition(State::Sync);
       return;
     }
+
+#if NO_INACTIVE_NO_SLEEP == 0
     if (in.button_short) {
       _transition(State::Inactive);
       return;
@@ -420,6 +419,7 @@ private:
       _transition(State::Inactive);
       return;
     }
+#endif
 
     // Periodic measurement + display.
     if (_last_idle_measure_ms == 0) {
@@ -604,7 +604,6 @@ private:
       if (ui_err != ESP_OK) {
         ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(ui_err));
       }
-
     }
 
     if (epd_ != nullptr) {
@@ -622,7 +621,12 @@ private:
   }
 
   void _tracking_enter_sleep(void) {
-    // TODO: configure wakeup sources/timer and enter tracking sleep.
+
+#if NO_INACTIVE_NO_SLEEP == 1
+    vTaskDelay(pdMS_TO_TICKS(GO_TRACKING_SLEEP_INTERVAL_S * 1000));
+    return;
+#endif // NO_INACTIVE_NO_SLEEP == 1
+
     ESP_LOGI(GO_TAG, "tracking: entering deep sleep (stub)");
 
     esp_err_t err = ESP_OK;

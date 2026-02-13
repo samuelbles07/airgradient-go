@@ -23,7 +23,7 @@ static constexpr int GO_IDLE_INACTIVE_TIMEOUT_MS = 60000;
 static constexpr uint32_t GO_INPUT_QUEUE_LEN = 16;
 
 // Tracking sleep interval.
-static constexpr uint32_t GO_TRACKING_SLEEP_INTERVAL_S = 3 * 60;
+static constexpr uint32_t GO_TRACKING_SLEEP_INTERVAL_S = 1 * 60;
 
 // GPS (UART).
 static constexpr uart_port_t GO_GPS_UART_PORT = UART_NUM_1;
