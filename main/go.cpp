@@ -960,7 +960,7 @@ private:
     if (ui_ != nullptr) {
       (void)ui_->set_tracking(false);
       (void)ui_->set_syncing(false);
-      (void)ui_->set_gps_fixed(false);
+      (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
       (void)ui_->set_pm25_ugm3(pm25);
       if (gps_ok && d.utc.time_valid) {
         (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
