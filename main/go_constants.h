@@ -37,6 +37,9 @@ static constexpr gpio_num_t GO_WDT_GPIO = GPIO_NUM_2;
 static constexpr uint32_t GO_WDT_RESET_PULSE_MS = 20;
 static constexpr uint32_t GO_WDT_RESET_INTERVAL_MS = 60 * 1000;
 
+// BQ25629 charger watchdog.
+static constexpr uint32_t GO_BQ_WDT_RESET_INTERVAL_MS = 10 * 1000;
+
 // NAND storage.
 static constexpr gpio_num_t GO_NAND_CS_GPIO = GPIO_NUM_4;
 static constexpr int GO_NAND_CLOCK_SPEED_HZ = 10 * 1000 * 1000;

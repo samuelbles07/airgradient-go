@@ -34,6 +34,7 @@
 #include "nand_storage_service.h"
 #include "go_constants.h"
 #include "WiFiManager.h"
+#include "bq25629.h"
 
 #include "gdey0213b74.h"
 #include "ui/dashboard_ui.h"
@@ -169,8 +170,8 @@ static bool utc_to_epoch_ms(const GPSService::UtcTime &utc, uint64_t *out_ms) {
   const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
   const int64_t days = (int64_t)era * 146097 + (int64_t)doe - 719468;
 
-  const int64_t sec = days * 86400LL + (int64_t)utc.hour * 3600LL + (int64_t)utc.min * 60LL +
-                      (int64_t)utc.sec;
+  const int64_t sec =
+      days * 86400LL + (int64_t)utc.hour * 3600LL + (int64_t)utc.min * 60LL + (int64_t)utc.sec;
   if (sec < 0) {
     return false;
   }
@@ -246,6 +247,52 @@ static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_han
 
   sleep_ms(GO_SPS30_WARMUP_DELAY_MS);
   ESP_LOGI(GO_TAG, "SPS30 ready");
+  return ESP_OK;
+}
+
+static esp_err_t init_charger(i2c_master_bus_handle_t bus_handle, drivers::BQ25629 **out) {
+  if (out == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  *out = nullptr;
+
+  static drivers::BQ25629 charger(bus_handle);
+
+  drivers::BQ25629_Config cfg = {
+      .charge_voltage_mv = 4200,
+      .charge_current_ma = 500,
+      .input_current_limit_ma = 1500,
+      .input_voltage_limit_mv = 4600,
+      .min_system_voltage_mv = 3520,
+      .precharge_current_ma = 30,
+      .term_current_ma = 20,
+      .enable_charging = true,
+      .enable_otg = false,
+      .enable_adc = true,
+  };
+
+  esp_err_t err = charger.init(cfg);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = charger.set_watchdog_timeout(drivers::WatchdogTimeout::Sec200);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = charger.enable_pmid_5v_boost();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = charger.reset_watchdog();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  ESP_LOGI(GO_TAG, "BQ25629 PMID boost enabled");
+  *out = &charger;
   return ESP_OK;
 }
 
@@ -403,9 +450,11 @@ class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, sps30_handle_t sps30,
                GPSService *gps, ui::DashboardUI *ui, ssd1680x::panels::GDEY0213B74 *epd,
-               NandStorageService *storage, uint32_t last_wdt_reset_ms)
+               NandStorageService *storage, drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms,
+               uint32_t last_bq_wdt_reset_ms)
       : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps), ui_(ui), epd_(epd),
-        storage_(storage), last_wdt_reset_ms_(last_wdt_reset_ms) {}
+        storage_(storage), charger_(charger), last_wdt_reset_ms_(last_wdt_reset_ms),
+        last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
     if (p == nullptr) {
@@ -434,7 +483,6 @@ public:
     if (p->source == ButtonService::Source::Touch) {
       // ESP_LOGI(GO_TAG, "Touch");
       if (p->id == GO_TRACKING_TOUCH_ID && ev == ButtonService::Event::LongPress) {
-      // if (ev == ButtonService::Event::LongPress) {
         GoInputEvent e;
         e.type = GoInputEventType::TouchLong;
         ESP_LOGI(GO_TAG, "event: touch long");
@@ -447,6 +495,7 @@ public:
   void Run(void) {
     _init();
     while (true) {
+      _kick_watchdogs_if_needed();
       Inputs inputs = _poll_inputs();
       _step(inputs);
       sleep_ms(GO_MAIN_LOOP_DELAY_MS);
@@ -461,9 +510,11 @@ private:
   ui::DashboardUI *ui_ = nullptr;
   ssd1680x::panels::GDEY0213B74 *epd_ = nullptr;
   NandStorageService *storage_ = nullptr;
+  drivers::BQ25629 *charger_ = nullptr;
 
   uint32_t last_wdt_reset_ms_ = 0;
   uint32_t tracking_session_id_ = 0;
+  uint32_t last_bq_wdt_reset_ms_ = 0;
 
   State _state = State::Idle;
   uint32_t _state_enter_ms = 0;
@@ -568,7 +619,7 @@ private:
   }
 
   void _state_idle(const Inputs &in) {
-    _kick_watchdog_if_needed();
+    _kick_watchdogs_if_needed();
 
     // Transitions from diagram.
     if (in.touch_long) {
@@ -606,13 +657,24 @@ private:
     }
   }
 
-  void _kick_watchdog_if_needed(void) {
-    const uint32_t elapsed_ms = now_ms() - last_wdt_reset_ms_;
-    if (elapsed_ms < GO_WDT_RESET_INTERVAL_MS) {
-      return;
+  void _kick_watchdogs_if_needed(void) {
+    const uint32_t now = now_ms();
+    const uint32_t ext_elapsed_ms = now - last_wdt_reset_ms_;
+    if (ext_elapsed_ms >= GO_WDT_RESET_INTERVAL_MS) {
+      reset_ext_watchdog();
+      last_wdt_reset_ms_ = now;
     }
-    reset_ext_watchdog();
-    last_wdt_reset_ms_ = now_ms();
+
+    if (charger_ != nullptr) {
+      const uint32_t bq_elapsed_ms = now - last_bq_wdt_reset_ms_;
+      if (bq_elapsed_ms >= GO_BQ_WDT_RESET_INTERVAL_MS) {
+        const esp_err_t err = charger_->reset_watchdog();
+        if (err != ESP_OK) {
+          ESP_LOGW(GO_TAG, "BQ25629 watchdog reset failed: %s", esp_err_to_name(err));
+        }
+        last_bq_wdt_reset_ms_ = now;
+      }
+    }
   }
 
   void _state_inactive(const Inputs &in) {
@@ -863,8 +925,7 @@ private:
           nread = 0;
           err = storage_->read_range_sync(idx, &r, 1, &nread, to);
           if (err != ESP_OK || nread != 1) {
-            ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx,
-                     esp_err_to_name(err));
+            ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx, esp_err_to_name(err));
             ok_all = false;
             break;
           }
@@ -1198,6 +1259,7 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(init_ext_watchdog());
   reset_ext_watchdog();
   const uint32_t wdt_last_reset_ms = now_ms();
+  uint32_t bq_wdt_last_reset_ms = now_ms();
 
   i2c_master_bus_config_t bus_cfg = {};
   bus_cfg.i2c_port = GO_I2C_MASTER_PORT;
@@ -1209,6 +1271,17 @@ extern "C" void app_main(void) {
 
   i2c_master_bus_handle_t bus_handle = nullptr;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
+
+  drivers::BQ25629 *charger_ptr = nullptr;
+  {
+    const esp_err_t err = init_charger(bus_handle, &charger_ptr);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "BQ25629 init failed: %s", esp_err_to_name(err));
+      charger_ptr = nullptr;
+    } else {
+      bq_wdt_last_reset_ms = now_ms();
+    }
+  }
 
   spi_bus_config_t buscfg = {};
   buscfg.mosi_io_num = GO_SPI_MOSI_GPIO;
@@ -1314,8 +1387,8 @@ extern "C" void app_main(void) {
     return;
   }
 
-  GoController go(&buttons, input_queue, sps30, gps_ptr, ui_ptr, epd_ptr, storage_ptr,
-                  wdt_last_reset_ms);
+  GoController go(&buttons, input_queue, sps30, gps_ptr, ui_ptr, epd_ptr, storage_ptr, charger_ptr,
+                  wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
