@@ -1,0 +1,24 @@
+Command: ninja all
+[1/9] Performing build step for 'bootloader'
+[1/1] cd /Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader/esp-idf/esptool_py && /Users/formylife/.espressif/python_env/idf5.5_py3.13_env/bin/python /Users/formylife/esp/v5.5.1/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x2000 /Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader/bootloader.bin
+Bootloader binary size 0x56a0 bytes. 0x960 bytes (10%) free.
+[2/9] No install step for 'bootloader'
+[3/9] Completed 'bootloader'
+[4/9] Building CXX object esp-idf/main/CMakeFiles/__idf_main.dir/go.cpp.obj
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/main/go.cpp: In function 'void initConsole()':
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/main/go.cpp:480:3: warning: missing initializer for member 'esp_console_config_t::heap_alloc_caps' [-Wmissing-field-initializers]
+  480 |   };
+      |   ^
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/main/go.cpp:480:3: warning: missing initializer for member 'esp_console_config_t::hint_color' [-Wmissing-field-initializers]
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/main/go.cpp:480:3: warning: missing initializer for member 'esp_console_config_t::hint_bold' [-Wmissing-field-initializers]
+[5/9] Linking C static library esp-idf/main/libmain.a
+[6/9] Generating esp-idf/esp_system/ld/sections.ld
+[7/9] Linking CXX executable airgradient-go.elf
+[8/9] Generating binary image from built executable
+esptool.py v4.11.0
+Creating esp32c5 image...
+Merged 4 ELF sections
+Successfully created esp32c5 image.
+Generated /Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/airgradient-go.bin
+[9/9] cd /Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/esp-idf/esptool_py && /Users/formylife/.espressif/python_env/idf5.5_py3.13_env/bin/python /Users/formylife/esp/v5.5.1/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/partition_table/partition-table.bin /Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/airgradient-go.bin
+airgradient-go.bin binary size 0x1483f0 bytes. Smallest app partition is 0x177000 bytes. 0x2ec10 bytes (12%) free.

@@ -211,6 +211,41 @@ static const char *state_name(State s) {
   return "UNKNOWN";
 }
 
+static const char *vbus_status_name(drivers::VBusStatus s) {
+  switch (s) {
+  case drivers::VBusStatus::NO_ADAPTER:
+    return "NO_ADAPTER";
+  case drivers::VBusStatus::USB_SDP:
+    return "USB_SDP";
+  case drivers::VBusStatus::USB_CDP:
+    return "USB_CDP";
+  case drivers::VBusStatus::USB_DCP:
+    return "USB_DCP";
+  case drivers::VBusStatus::UNKNOWN_ADAPTER:
+    return "UNKNOWN_ADAPTER";
+  case drivers::VBusStatus::NON_STANDARD:
+    return "NON_STANDARD";
+  case drivers::VBusStatus::OTG_MODE:
+    return "OTG_MODE";
+  }
+  return "UNDEFINED";
+}
+
+static bool is_usb_c_adapter_present(drivers::VBusStatus s) {
+  switch (s) {
+  case drivers::VBusStatus::USB_SDP:
+  case drivers::VBusStatus::USB_CDP:
+  case drivers::VBusStatus::USB_DCP:
+  case drivers::VBusStatus::UNKNOWN_ADAPTER:
+  case drivers::VBusStatus::NON_STANDARD:
+    return true;
+  case drivers::VBusStatus::NO_ADAPTER:
+  case drivers::VBusStatus::OTG_MODE:
+    return false;
+  }
+  return false;
+}
+
 static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_handle_t *out) {
   if (out == nullptr) {
     return ESP_ERR_INVALID_ARG;
@@ -449,11 +484,12 @@ static void initConsole() {
 class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, sps30_handle_t sps30,
+               i2c_master_bus_handle_t i2c_bus,
                GPSService *gps, ui::DashboardUI *ui, ssd1680x::panels::GDEY0213B74 *epd,
                NandStorageService *storage, drivers::BQ25629 *charger,
                uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
-      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), gps_(gps), ui_(ui), epd_(epd),
-        storage_(storage), charger_(charger), last_wdt_reset_ms_(last_wdt_reset_ms),
+      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), i2c_bus_(i2c_bus), gps_(gps),
+        ui_(ui), epd_(epd), storage_(storage), charger_(charger), last_wdt_reset_ms_(last_wdt_reset_ms),
         last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
@@ -497,6 +533,7 @@ public:
     _init();
     while (true) {
       _kick_watchdogs_if_needed();
+      _poll_usb_c_if_needed();
       Inputs inputs = _poll_inputs();
       _step(inputs);
       sleep_ms(GO_MAIN_LOOP_DELAY_MS);
@@ -507,6 +544,7 @@ private:
   ButtonService *buttons_ = nullptr;
   QueueHandle_t input_queue_ = nullptr;
   sps30_handle_t sps30_ = nullptr;
+  i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
   ui::DashboardUI *ui_ = nullptr;
   ssd1680x::panels::GDEY0213B74 *epd_ = nullptr;
@@ -515,6 +553,7 @@ private:
 
   uint32_t last_wdt_reset_ms_ = 0;
   uint32_t last_bq_wdt_reset_ms_ = 0;
+  uint32_t last_bq_vbus_poll_ms_ = 0;
   uint32_t tracking_session_id_ = 0;
 
   State _state = State::Idle;
@@ -524,6 +563,9 @@ private:
   bool _tracking_started = false;
   std::string _serial_number;
   bool _sync_wifi_connected = false;
+  bool charger_vbus_seen_ = false;
+  bool usb_c_adapter_present_ = false;
+  drivers::VBusStatus last_vbus_status_ = drivers::VBusStatus::NO_ADAPTER;
 
   void _init(void) {
     tracking_session_id_ = RTC_TRACKING_SESSION_ID;
@@ -674,6 +716,157 @@ private:
         last_bq_wdt_reset_ms_ = now;
       }
     }
+  }
+
+  void _poll_usb_c_if_needed(void) {
+    if (charger_ == nullptr) {
+      return;
+    }
+
+    const uint32_t now = now_ms();
+    if ((now - last_bq_vbus_poll_ms_) < GO_BQ_VBUS_POLL_INTERVAL_MS) {
+      return;
+    }
+    last_bq_vbus_poll_ms_ = now;
+
+    drivers::VBusStatus vbus = drivers::VBusStatus::NO_ADAPTER;
+    const esp_err_t err = charger_->get_vbus_status(vbus);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "BQ25629 get_vbus_status failed: %s", esp_err_to_name(err));
+      return;
+    }
+
+    const bool adapter_present = is_usb_c_adapter_present(vbus);
+    if (!charger_vbus_seen_) {
+      charger_vbus_seen_ = true;
+      usb_c_adapter_present_ = adapter_present;
+      last_vbus_status_ = vbus;
+      ESP_LOGI(GO_TAG, "USB-C initial: %s (vbus=%s)", adapter_present ? "plugged" : "unplugged",
+               vbus_status_name(vbus));
+      return;
+    }
+
+    if (vbus != last_vbus_status_) {
+      ESP_LOGI(GO_TAG, "BQ25629 vbus: %s -> %s", vbus_status_name(last_vbus_status_),
+               vbus_status_name(vbus));
+    }
+
+    if (adapter_present != usb_c_adapter_present_) {
+      if (adapter_present) {
+        ESP_LOGI(GO_TAG, "USB-C plugged");
+        _handle_usb_c_plugged_event();
+      } else {
+        ESP_LOGW(GO_TAG, "USB-C unplugged: wait PMID to 5V then re-init SPS30");
+        _enable_pmid_wait_and_reinit_sps30("USB-C unplugged");
+      }
+      usb_c_adapter_present_ = adapter_present;
+    }
+
+    last_vbus_status_ = vbus;
+  }
+
+  void _handle_usb_c_plugged_event(void) {
+    if (charger_ == nullptr) {
+      ESP_LOGW(GO_TAG, "USB-C plugged: charger unavailable");
+      return;
+    }
+
+    drivers::BQ25629_ADC_Data adc = {};
+    const esp_err_t adc_err = charger_->read_adc(adc);
+    if (adc_err == ESP_OK) {
+      if (adc.vpmid_mv >= GO_BQ_VPMID_READY_MV) {
+        ESP_LOGI(GO_TAG, "USB-C plugged: PMID=%umV ready, re-initializing SPS30",
+                 (unsigned)adc.vpmid_mv);
+        _reinit_sps30("USB-C plugged");
+        return;
+      }
+      ESP_LOGW(GO_TAG, "USB-C plugged: PMID=%umV not ready, enabling PMID boost",
+               (unsigned)adc.vpmid_mv);
+    } else {
+      ESP_LOGW(GO_TAG, "USB-C plugged: PMID read failed (%s), enabling PMID boost",
+               esp_err_to_name(adc_err));
+    }
+
+    _enable_pmid_wait_and_reinit_sps30("USB-C plugged");
+  }
+
+  void _enable_pmid_wait_and_reinit_sps30(const char *reason) {
+    if (charger_ == nullptr) {
+      ESP_LOGW(GO_TAG, "PMID wait skipped: charger unavailable");
+      return;
+    }
+
+    esp_err_t err = charger_->enable_pmid_5v_boost();
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "PMID boost enable failed: %s", esp_err_to_name(err));
+      return;
+    }
+
+    uint32_t last_log_ms = 0;
+    uint32_t last_reenable_ms = now_ms();
+    while (true) {
+      _kick_watchdogs_if_needed();
+
+      drivers::BQ25629_ADC_Data adc = {};
+      err = charger_->read_adc(adc);
+      if (err == ESP_OK) {
+        if (adc.vpmid_mv >= GO_BQ_VPMID_READY_MV) {
+          ESP_LOGI(GO_TAG, "%s: PMID ready %umV, re-initializing SPS30", reason,
+                   (unsigned)adc.vpmid_mv);
+          break;
+        }
+
+        const uint32_t now = now_ms();
+        if ((now - last_log_ms) >= 1000) {
+          ESP_LOGI(GO_TAG, "%s: waiting PMID %umV (target >= %umV)", reason,
+                   (unsigned)adc.vpmid_mv, (unsigned)GO_BQ_VPMID_READY_MV);
+          last_log_ms = now;
+        }
+      } else {
+        const uint32_t now = now_ms();
+        if ((now - last_log_ms) >= 1000) {
+          ESP_LOGW(GO_TAG, "%s: PMID ADC read failed while waiting: %s", reason,
+                   esp_err_to_name(err));
+          last_log_ms = now;
+        }
+      }
+
+      const uint32_t now = now_ms();
+      if ((now - last_reenable_ms) >= GO_BQ_VPMID_REENABLE_INTERVAL_MS) {
+        (void)charger_->enable_pmid_5v_boost();
+        last_reenable_ms = now;
+      }
+
+      sleep_ms(GO_BQ_VPMID_POLL_INTERVAL_MS);
+    }
+
+    _reinit_sps30(reason);
+  }
+
+  void _reinit_sps30(const char *reason) {
+    if (i2c_bus_ == nullptr) {
+      ESP_LOGW(GO_TAG, "SPS30 re-init skipped: I2C bus unavailable");
+      return;
+    }
+
+    if (sps30_ != nullptr) {
+      const esp_err_t del_err = sps30_delete(sps30_);
+      if (del_err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "SPS30 delete failed before re-init: %s", esp_err_to_name(del_err));
+        return;
+      }
+      sps30_ = nullptr;
+    }
+
+    sps30_handle_t new_sps30 = nullptr;
+    const esp_err_t init_err = init_sps30_sensor(i2c_bus_, &new_sps30);
+    if (init_err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "SPS30 re-init failed (%s): %s", reason, esp_err_to_name(init_err));
+      return;
+    }
+
+    sps30_ = new_sps30;
+    ESP_LOGI(GO_TAG, "SPS30 re-initialized (%s)", reason);
   }
 
   void _state_inactive(const Inputs &in) {
@@ -1387,8 +1580,8 @@ extern "C" void app_main(void) {
     return;
   }
 
-  GoController go(&buttons, input_queue, sps30, gps_ptr, ui_ptr, epd_ptr, storage_ptr, charger_ptr,
-                  wdt_last_reset_ms, bq_wdt_last_reset_ms);
+  GoController go(&buttons, input_queue, sps30, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr,
+                  charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 

@@ -39,6 +39,10 @@ static constexpr uint32_t GO_WDT_RESET_INTERVAL_MS = 60 * 1000;
 
 // BQ25629 charger watchdog.
 static constexpr uint32_t GO_BQ_WDT_RESET_INTERVAL_MS = 10 * 1000;
+static constexpr uint32_t GO_BQ_VBUS_POLL_INTERVAL_MS = 1000;
+static constexpr uint16_t GO_BQ_VPMID_READY_MV = 4900; // 5V nominal threshold
+static constexpr uint32_t GO_BQ_VPMID_POLL_INTERVAL_MS = 100;
+static constexpr uint32_t GO_BQ_VPMID_REENABLE_INTERVAL_MS = 1000;
 
 // NAND storage.
 static constexpr gpio_num_t GO_NAND_CS_GPIO = GPIO_NUM_4;
