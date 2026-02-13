@@ -17,6 +17,7 @@
 #include "esp_event.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include "esp_http_client.h"
@@ -596,9 +597,12 @@ private:
   }
 
   void _start_new_tracking_session(void) {
-    RTC_TRACKING_SESSION_ID += 1;
-    tracking_session_id_ = RTC_TRACKING_SESSION_ID;
-    ESP_LOGI(GO_TAG, "tracking session id=%" PRIu32, tracking_session_id_);
+    static constexpr uint32_t MIN_ID = 10000;
+    static constexpr uint32_t SPAN = 90000;
+    const uint32_t new_id = (esp_random() % SPAN) + MIN_ID;
+    RTC_TRACKING_SESSION_ID = new_id;
+    tracking_session_id_ = new_id;
+    ESP_LOGI(GO_TAG, "tracking session id=%05" PRIu32, tracking_session_id_);
   }
 
   Inputs _poll_inputs(void) {
