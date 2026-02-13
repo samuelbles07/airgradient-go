@@ -167,8 +167,8 @@ extern "C" void app_main(void) {
   buttonService.init();
   esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, nullptr);
 
-      // Init GPS
-      GPSService::Config gpsConfig;
+  // Init GPS
+  GPSService::Config gpsConfig;
   gpsConfig.uart_num = UART_GPS_PORT;
   gpsConfig.rx_pin = UART_GPS_RX;
   gpsConfig.tx_pin = UART_GPS_TX;

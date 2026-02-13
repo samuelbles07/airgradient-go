@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/CMakeFiles/bootloader
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/CMakeFiles/bootloader.rule
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/CMakeFiles/bootloader-complete.rule
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+/Users/formylife/Documents/airgradient_code/airgradient-go-sam/build_bq_test/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule
