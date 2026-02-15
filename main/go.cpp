@@ -73,6 +73,7 @@ static bool is_valid_rtc_state(State s) {
 struct Inputs {
   bool button_short = false;
   bool button_long = false;
+  bool boot_long = false;
   bool touch_right_long = false;
   bool touch_left_long = false;
   bool touch_enter_long = false;
@@ -81,9 +82,10 @@ struct Inputs {
 enum class GoInputEventType : uint8_t {
   ButtonShort = 1,
   ButtonLong = 2,
-  TouchRightLong = 3,
-  TouchLeftLong = 4,
-  TouchEnterLong = 5,
+  BootLong = 3,
+  TouchRightLong = 4,
+  TouchLeftLong = 5,
+  TouchEnterLong = 6,
 };
 
 struct GoInputEvent {
@@ -511,16 +513,25 @@ public:
 
     const ButtonService::Event ev = static_cast<ButtonService::Event>(id);
     if (p->source == ButtonService::Source::Physical) {
-      if (ev == ButtonService::Event::ShortPress) {
-        GoInputEvent e;
-        e.type = GoInputEventType::ButtonShort;
-        ESP_LOGI(GO_TAG, "event: physical short");
-        (void)xQueueSend(input_queue_, &e, 0);
-      } else if (ev == ButtonService::Event::LongPress) {
-        GoInputEvent e;
-        e.type = GoInputEventType::ButtonLong;
-        ESP_LOGI(GO_TAG, "event: physical long");
-        (void)xQueueSend(input_queue_, &e, 0);
+      if (p->id == 0) {
+        if (ev == ButtonService::Event::ShortPress) {
+          GoInputEvent e;
+          e.type = GoInputEventType::ButtonShort;
+          ESP_LOGI(GO_TAG, "event: QON short");
+          (void)xQueueSend(input_queue_, &e, 0);
+        } else if (ev == ButtonService::Event::LongPress) {
+          GoInputEvent e;
+          e.type = GoInputEventType::ButtonLong;
+          ESP_LOGI(GO_TAG, "event: QON long");
+          (void)xQueueSend(input_queue_, &e, 0);
+        }
+      } else if (p->id == 1) {
+        if (ev == ButtonService::Event::LongPress) {
+          GoInputEvent e;
+          e.type = GoInputEventType::BootLong;
+          ESP_LOGI(GO_TAG, "event: BOOT long");
+          (void)xQueueSend(input_queue_, &e, 0);
+        }
       }
       return;
     }
@@ -534,10 +545,6 @@ public:
       if (p->id == GO_TOUCH_RIGHT_ID) {
         e.type = GoInputEventType::TouchRightLong;
         ESP_LOGI(GO_TAG, "event: touch right long");
-        (void)xQueueSend(input_queue_, &e, 0);
-      } else if (p->id == GO_TOUCH_LEFT_ID) {
-        e.type = GoInputEventType::TouchLeftLong;
-        ESP_LOGI(GO_TAG, "event: touch left long");
         (void)xQueueSend(input_queue_, &e, 0);
       } else if (p->id == GO_TOUCH_ENTER_ID) {
         e.type = GoInputEventType::TouchEnterLong;
@@ -638,6 +645,8 @@ private:
         in.button_short = true;
       } else if (ev.type == GoInputEventType::ButtonLong) {
         in.button_long = true;
+      } else if (ev.type == GoInputEventType::BootLong) {
+        in.boot_long = true;
       } else if (ev.type == GoInputEventType::TouchRightLong) {
         in.touch_right_long = true;
       } else if (ev.type == GoInputEventType::TouchLeftLong) {
@@ -723,16 +732,16 @@ private:
       _transition(State::Tracking);
       return;
     }
-    if (in.touch_left_long) {
+    if (in.touch_enter_long) {
       _transition(State::Sync);
       return;
     }
-    if (in.touch_enter_long) {
+    if (in.boot_long) {
       _clear_tracking_logs();
       return;
     }
     if (in.button_long) {
-      _transition(State::Shutdown);
+      // _transition(State::Shutdown);
       return;
     }
 
@@ -1675,10 +1684,12 @@ extern "C" void app_main(void) {
   }
 
   ButtonService::Config bcfg;
-  bcfg.physical_gpio = GO_BUTTON_PHYSICAL_GPIO;
+  bcfg.qon_gpio = GO_BUTTON_QON_GPIO;
+  bcfg.boot_gpio = GO_BUTTON_BOOT_GPIO;
   bcfg.cap_alert_gpio = GO_TOUCH_ALERT_GPIO;
   bcfg.cap_alert_active_low = GO_TOUCH_ALERT_ACTIVE_LOW;
-  bcfg.physical_active_low = GO_BUTTON_PHYSICAL_ACTIVE_LOW;
+  bcfg.qon_active_low = GO_BUTTON_QON_ACTIVE_LOW;
+  bcfg.boot_active_low = GO_BUTTON_BOOT_ACTIVE_LOW;
   bcfg.cap_required = GO_TOUCH_REQUIRED;
   bcfg.debounce_ms = GO_BUTTON_DEBOUNCE_MS;
   bcfg.long_press_ms = GO_BUTTON_LONG_PRESS_MS;
