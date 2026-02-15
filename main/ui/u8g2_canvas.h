@@ -35,6 +35,8 @@ class U8g2Canvas {
   void draw_str(int x, int y_top, const char* s);
   void draw_str_centered(int x, int y, int w, int h, const char* s);
 
+  void draw_xbmp(int x, int y_top, int w, int h, const uint8_t* bitmap);
+
   void draw_hline(int x, int y, int w);
 
  private:

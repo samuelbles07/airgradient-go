@@ -149,6 +149,17 @@ void U8g2Canvas::draw_str_centered(int x, int y, int w, int h, const char* s) {
   draw_str(sx, sy, s);
 }
 
+void U8g2Canvas::draw_xbmp(int x, int y_top, int w, int h, const uint8_t* bitmap) {
+  if (bitmap == nullptr) {
+    return;
+  }
+  if (w <= 0 || h <= 0) {
+    return;
+  }
+  u8g2_DrawXBMP(&u8g2_, (u8g2_uint_t)x, (u8g2_uint_t)y_top, (u8g2_uint_t)w, (u8g2_uint_t)h,
+                bitmap);
+}
+
 void U8g2Canvas::draw_hline(int x, int y, int w) {
   if (w <= 0) {
     return;

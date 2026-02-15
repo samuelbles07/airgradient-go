@@ -2,6 +2,7 @@
 
 #include "ui/dashboard_ui.h"
 
+#include <cstdint>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,7 +19,22 @@ extern const uint8_t u8g2_font_10x20_tn[];
 
 namespace ui {
 
-DashboardUI::DashboardUI(ssd1680x::panels::GDEY0213B74& epd) : epd_(epd) {}
+static const uint8_t GPS_FIX_XBM[] = {
+    0x80, 0x01, 0xE0, 0x07, 0xF0, 0x0F, 0x78, 0x1E, 0x38, 0x1C, 0x18, 0x18, 0x38, 0x1C, 0x38, 0x1C,
+    0xF8, 0x1F, 0xF0, 0x0F, 0xF0, 0x0F, 0xE0, 0x07, 0xE0, 0x07, 0xC0, 0x03, 0x80, 0x01, 0x00, 0x00,
+};
+
+static const uint8_t SYNC_XBM[] = {
+    0x00, 0x00, 0x80, 0x01, 0xF2, 0x0F, 0x1A, 0x18, 0x0E, 0x30, 0x06, 0x20, 0x3E, 0x20, 0x00, 0x00,
+    0x00, 0x00, 0x04, 0x7C, 0x04, 0x60, 0x0C, 0x70, 0x18, 0x58, 0xF0, 0x4F, 0x80, 0x01, 0x00, 0x00,
+};
+
+static const uint8_t TRACKING_XBM[] = {
+    0x00, 0x00, 0x10, 0x00, 0x38, 0x00, 0xFC, 0x0F, 0x38, 0x10, 0x00, 0x20, 0x00, 0x00, 0x00, 0x18,
+    0x10, 0x00, 0x08, 0x00, 0x08, 0x00, 0x08, 0x1E, 0xF0, 0x1F, 0x00, 0x1E, 0x00, 0x0C, 0x00, 0x00,
+};
+
+DashboardUI::DashboardUI(ssd1680x::panels::GDEY0213B74 &epd) : epd_(epd) {}
 
 esp_err_t DashboardUI::init() {
   esp_err_t err = epd_.ensure_init_full();
@@ -49,8 +65,10 @@ esp_err_t DashboardUI::render_static_() {
   // Clock is dynamic; leave background empty.
 
   // Section labels.
-  c.draw_str_centered(DashboardUI::TEXT_INSET + 1, 18, W - DashboardUI::TEXT_INSET, 12, "PM2.5 (UG/M3)");
-  c.draw_str_centered(DashboardUI::TEXT_INSET + 1, 66, W - DashboardUI::TEXT_INSET, 12, "CO2 (PPM)");
+  c.draw_str_centered(DashboardUI::TEXT_INSET + 1, 18, W - DashboardUI::TEXT_INSET, 12,
+                      "PM2.5 (UG/M3)");
+  c.draw_str_centered(DashboardUI::TEXT_INSET + 1, 66, W - DashboardUI::TEXT_INSET, 12,
+                      "CO2 (PPM)");
 
   // Divider between hero section and grid.
   c.draw_hline(0, GRID_Y - 6, W);
@@ -66,38 +84,8 @@ esp_err_t DashboardUI::render_static_() {
   return ESP_OK;
 }
 
-void DashboardUI::build_status_() {
-  status_[0] = '\0';
-
-  auto append = [&](const char* s) {
-    if (s == nullptr || s[0] == '\0') {
-      return;
-    }
-    const size_t cur = strlen(status_);
-    const size_t cap = sizeof(status_);
-    if (cur + 1 >= cap) {
-      return;
-    }
-    if (cur != 0) {
-      status_[cur] = ' ';
-      status_[cur + 1] = '\0';
-    }
-    strncat(status_, s, cap - strlen(status_) - 1);
-  };
-
-  if (tracking_) {
-    append("TR");
-  }
-  if (syncing_) {
-    append("SY");
-  }
-  if (gps_fixed_) {
-    append("GF");
-  }
-}
-
-void DashboardUI::render_text_(const Rect& r, uint8_t* buf, size_t len, const char* text, const uint8_t* font,
-                               bool centered) {
+void DashboardUI::render_text_(const Rect &r, uint8_t *buf, size_t len, const char *text,
+                               const uint8_t *font, bool centered) {
   if (buf == nullptr || len == 0) {
     return;
   }
@@ -116,7 +104,8 @@ void DashboardUI::render_text_(const Rect& r, uint8_t* buf, size_t len, const ch
   }
 }
 
-void DashboardUI::render_value_left_(const Rect& r, uint8_t* buf, size_t len, const char* text, const uint8_t* font) {
+void DashboardUI::render_value_left_(const Rect &r, uint8_t *buf, size_t len, const char *text,
+                                     const uint8_t *font) {
   if (buf == nullptr || len == 0) {
     return;
   }
@@ -134,7 +123,34 @@ void DashboardUI::render_value_left_(const Rect& r, uint8_t* buf, size_t len, co
 esp_err_t DashboardUI::batch_write_all_() {
   render_text_(CLOCK_R, buf_clock_, sizeof(buf_clock_), clock_, u8g2_font_6x10_tr, false);
   render_text_(PM_VALUE_R, buf_pm_, sizeof(buf_pm_), pm_, u8g2_font_10x20_tn, true);
-  render_text_(STATUS_R, buf_status_, sizeof(buf_status_), status_, u8g2_font_6x10_tr, true);
+
+  {
+    U8g2Canvas w;
+    w.attach(buf_tracking_, sizeof(buf_tracking_), TRACKING_R.w, TRACKING_R.h, MIRROR_X);
+    w.clear_white();
+    w.set_color_black();
+    if (tracking_) {
+      w.draw_xbmp(0, 0, TRACKING_R.w, TRACKING_R.h, TRACKING_XBM);
+    }
+  }
+  {
+    U8g2Canvas w;
+    w.attach(buf_sync_, sizeof(buf_sync_), SYNC_R.w, SYNC_R.h, MIRROR_X);
+    w.clear_white();
+    w.set_color_black();
+    if (syncing_) {
+      w.draw_xbmp(0, 0, SYNC_R.w, SYNC_R.h, SYNC_XBM);
+    }
+  }
+  {
+    U8g2Canvas w;
+    w.attach(buf_gps_fix_, sizeof(buf_gps_fix_), GPS_FIX_R.w, GPS_FIX_R.h, MIRROR_X);
+    w.clear_white();
+    w.set_color_black();
+    if (gps_fixed_) {
+      w.draw_xbmp(0, 0, GPS_FIX_R.w, GPS_FIX_R.h, GPS_FIX_XBM);
+    }
+  }
   // render_text_(CO2_VALUE_R, buf_co2_, sizeof(buf_co2_), co2_, u8g2_font_10x20_tn, true);
   // render_value_left_(TEMP_R, buf_temp_, sizeof(buf_temp_), temp_, u8g2_font_6x10_tr);
   // render_value_left_(HUM_R, buf_hum_, sizeof(buf_hum_), hum_, u8g2_font_6x10_tr);
@@ -144,14 +160,28 @@ esp_err_t DashboardUI::batch_write_all_() {
   // render_value_left_(ALT_R, buf_alt_, sizeof(buf_alt_), alt_, u8g2_font_6x10_tr);
 
   esp_err_t err = epd_.partial_begin();
-  if (err != ESP_OK) return err;
+  if (err != ESP_OK)
+    return err;
 
-  err = epd_.partial_write_bw(CLOCK_R.x, CLOCK_R.y, CLOCK_R.w, CLOCK_R.h, buf_clock_, RAW_LEN(CLOCK_R));
-  if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(PM_VALUE_R.x, PM_VALUE_R.y, PM_VALUE_R.w, PM_VALUE_R.h, buf_pm_, RAW_LEN(PM_VALUE_R));
-  if (err != ESP_OK) goto out_err;
-  err = epd_.partial_write_bw(STATUS_R.x, STATUS_R.y, STATUS_R.w, STATUS_R.h, buf_status_, RAW_LEN(STATUS_R));
-  if (err != ESP_OK) goto out_err;
+  err = epd_.partial_write_bw(CLOCK_R.x, CLOCK_R.y, CLOCK_R.w, CLOCK_R.h, buf_clock_,
+                              RAW_LEN(CLOCK_R));
+  if (err != ESP_OK)
+    goto out_err;
+  err = epd_.partial_write_bw(TRACKING_R.x, TRACKING_R.y, TRACKING_R.w, TRACKING_R.h, buf_tracking_,
+                              RAW_LEN(TRACKING_R));
+  if (err != ESP_OK)
+    goto out_err;
+  err = epd_.partial_write_bw(SYNC_R.x, SYNC_R.y, SYNC_R.w, SYNC_R.h, buf_sync_, RAW_LEN(SYNC_R));
+  if (err != ESP_OK)
+    goto out_err;
+  err = epd_.partial_write_bw(GPS_FIX_R.x, GPS_FIX_R.y, GPS_FIX_R.w, GPS_FIX_R.h, buf_gps_fix_,
+                              RAW_LEN(GPS_FIX_R));
+  if (err != ESP_OK)
+    goto out_err;
+  err = epd_.partial_write_bw(PM_VALUE_R.x, PM_VALUE_R.y, PM_VALUE_R.w, PM_VALUE_R.h, buf_pm_,
+                              RAW_LEN(PM_VALUE_R));
+  if (err != ESP_OK)
+    goto out_err;
   // err = epd_.partial_write_bw(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, buf_co2_, RAW_LEN(CO2_VALUE_R));
   // if (err != ESP_OK) goto out_err;
   // err = epd_.partial_write_bw(TEMP_R.x, TEMP_R.y, TEMP_R.w, TEMP_R.h, buf_temp_, RAW_LEN(TEMP_R));
@@ -190,9 +220,15 @@ void DashboardUI::render_full_frame_() {
   c.draw_str_centered(PM_VALUE_R.x, PM_VALUE_R.y, PM_VALUE_R.w, PM_VALUE_R.h, pm_);
   // c.draw_str_centered(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, co2_);
 
-  // Status indicators.
-  c.set_font(u8g2_font_6x10_tr);
-  c.draw_str_centered(STATUS_R.x, STATUS_R.y, STATUS_R.w, STATUS_R.h, status_);
+  if (tracking_) {
+    c.draw_xbmp(TRACKING_R.x, TRACKING_R.y, TRACKING_R.w, TRACKING_R.h, TRACKING_XBM);
+  }
+  if (syncing_) {
+    c.draw_xbmp(SYNC_R.x, SYNC_R.y, SYNC_R.w, SYNC_R.h, SYNC_XBM);
+  }
+  if (gps_fixed_) {
+    c.draw_xbmp(GPS_FIX_R.x, GPS_FIX_R.y, GPS_FIX_R.w, GPS_FIX_R.h, GPS_FIX_XBM);
+  }
 
   // c.set_font(u8g2_font_6x10_tr);
   // c.draw_str(TEMP_R.x + TEXT_INSET, TEMP_R.y + 2, temp_);
@@ -245,7 +281,8 @@ esp_err_t DashboardUI::set_time_hm(int hh, int mm) {
 
 esp_err_t DashboardUI::set_pm25_ugm3(float v) {
   // 1 decimal place, avoid -0.0
-  if (fabsf(v) < 0.05f) v = 0.0f;
+  if (fabsf(v) < 0.05f)
+    v = 0.0f;
   snprintf(pm_, sizeof(pm_), "%.1f", (double)v);
   return ESP_OK;
 }
@@ -287,7 +324,6 @@ esp_err_t DashboardUI::set_altitude_m(int v) {
 
 esp_err_t DashboardUI::set_gps_fixed(bool fixed) {
   gps_fixed_ = fixed;
-  build_status_();
   return ESP_OK;
 }
 
@@ -296,7 +332,6 @@ esp_err_t DashboardUI::set_tracking(bool tracking) {
   if (tracking_) {
     syncing_ = false;
   }
-  build_status_();
   return ESP_OK;
 }
 
@@ -305,7 +340,6 @@ esp_err_t DashboardUI::set_syncing(bool syncing) {
   if (syncing_) {
     tracking_ = false;
   }
-  build_status_();
   return ESP_OK;
 }
 
@@ -338,4 +372,4 @@ esp_err_t DashboardUI::clear_and_sleep() {
   return epd_.deep_sleep();
 }
 
-}  // namespace ui
+} // namespace ui

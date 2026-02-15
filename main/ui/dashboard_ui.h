@@ -38,10 +38,6 @@ class DashboardUI {
   esp_err_t set_pressure_hpa(int v);
   esp_err_t set_altitude_m(int v);
 
-  // Small bottom-of-screen indicators.
-  // - gps_fixed: "GF"
-  // - tracking: "TR"
-  // - syncing: "SY"
   esp_err_t set_gps_fixed(bool fixed);
   esp_err_t set_tracking(bool tracking);
   esp_err_t set_syncing(bool syncing);
@@ -68,8 +64,12 @@ class DashboardUI {
   static constexpr Rect PM_VALUE_R = {0, 32, 128, 32};
   static constexpr Rect CO2_VALUE_R = {0, 80, 128, 32};
 
-  // Bottom status indicator area (small text).
-  static constexpr Rect STATUS_R = {64, H - 35, 64, 16};
+  // Top-right GPS-fix indicator icon.
+  static constexpr Rect GPS_FIX_R = {W - 16, 0, 16, 16};
+
+  // Top-right status icons.
+  static constexpr Rect SYNC_R = {W - 32, 0, 16, 16};
+  static constexpr Rect TRACKING_R = {W - 48, 0, 16, 16};
 
   static constexpr int GRID_Y = 124;
   static constexpr int ROW_H = 32;
@@ -93,8 +93,9 @@ class DashboardUI {
   static constexpr size_t CLOCK_BUFSZ = (size_t)(CLOCK_R.w / 8) * (size_t)CLOCK_R.h;
   static constexpr size_t PM_BUFSZ = (size_t)(PM_VALUE_R.w / 8) * (size_t)PM_VALUE_R.h;
   static constexpr size_t CO2_BUFSZ = (size_t)(CO2_VALUE_R.w / 8) * (size_t)CO2_VALUE_R.h;
-  static constexpr size_t STATUS_BUFSZ = (size_t)(STATUS_R.w / 8) * (size_t)STATUS_R.h;
-
+  static constexpr size_t GPS_FIX_BUFSZ = (size_t)(GPS_FIX_R.w / 8) * (size_t)GPS_FIX_R.h;
+  static constexpr size_t SYNC_BUFSZ = (size_t)(SYNC_R.w / 8) * (size_t)SYNC_R.h;
+  static constexpr size_t TRACKING_BUFSZ = (size_t)(TRACKING_R.w / 8) * (size_t)TRACKING_R.h;
   static constexpr size_t TEMP_BUFSZ = (size_t)(TEMP_R.w / 8) * (size_t)TILE_PAD_H;
   static constexpr size_t HUM_BUFSZ = (size_t)(HUM_R.w / 8) * (size_t)TILE_PAD_H;
   static constexpr size_t TVOC_BUFSZ = (size_t)(TVOC_R.w / 8) * (size_t)TILE_PAD_H;
@@ -110,13 +111,15 @@ class DashboardUI {
   uint8_t buf_clock_[CLOCK_BUFSZ];
   uint8_t buf_pm_[PM_BUFSZ];
   uint8_t buf_co2_[CO2_BUFSZ];
+  uint8_t buf_tracking_[TRACKING_BUFSZ];
+  uint8_t buf_sync_[SYNC_BUFSZ];
+  uint8_t buf_gps_fix_[GPS_FIX_BUFSZ];
   uint8_t buf_temp_[TEMP_BUFSZ];
   uint8_t buf_hum_[HUM_BUFSZ];
   uint8_t buf_tvoc_[TVOC_BUFSZ];
   uint8_t buf_nox_[NOX_BUFSZ];
   uint8_t buf_pres_[PRES_BUFSZ];
   uint8_t buf_alt_[ALT_BUFSZ];
-  uint8_t buf_status_[STATUS_BUFSZ];
 
   char clock_[8] = {0};
   char pm_[16] = {0};
@@ -128,7 +131,6 @@ class DashboardUI {
   char pres_[16] = {0};
   char alt_[16] = {0};
 
-  char status_[16] = {0};
   bool gps_fixed_ = false;
   bool tracking_ = false;
   bool syncing_ = false;
@@ -138,7 +140,6 @@ class DashboardUI {
   static constexpr uint32_t FULL_BASEMAP_EVERY = 24;   // every 2 min at 5s cadence
 
   esp_err_t render_static_();
-  void build_status_();
   void render_text_(const Rect& r, uint8_t* buf, size_t len, const char* text, const uint8_t* font, bool centered);
   void render_value_left_(const Rect& r, uint8_t* buf, size_t len, const char* text, const uint8_t* font);
   esp_err_t batch_write_all_();
