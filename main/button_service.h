@@ -43,19 +43,25 @@ public:
     // Use GPIO_NUM_MAX if not connected (touch can be optional via cap_required=false).
     gpio_num_t cap_alert_gpio = GPIO_NUM_MAX;
 
-    // GPIO for the single physical button input.
-    gpio_num_t physical_gpio = GPIO_NUM_MAX;
+    // GPIO for the QON button input.
+    gpio_num_t qon_gpio = GPIO_NUM_MAX;
+
+    // GPIO for the BOOT button input.
+    gpio_num_t boot_gpio = GPIO_NUM_MAX;
 
     // If true, CAP1203 ALERT# is considered asserted when the pin reads low.
     bool cap_alert_active_low = true;
 
-    // If true, the physical button is considered pressed when the pin reads low.
-    bool physical_active_low = true;
+    // If true, QON is considered pressed when the pin reads low.
+    bool qon_active_low = true;
+
+    // If true, BOOT is considered pressed when the pin reads low.
+    bool boot_active_low = true;
 
     // If true, init() fails if CAP1203 init/probe fails. If false, touch is disabled on failure.
     bool cap_required = false;
 
-    // Debounce window (ms) for the physical button edge handling.
+    // Debounce window (ms) for physical button edge handling.
     uint32_t debounce_ms = 30;
 
     // Long press threshold (ms) used for both touch + physical.
@@ -114,6 +120,7 @@ private:
   struct IsrCtx {
     ButtonService *self;
     Source source;
+    uint8_t id;
   };
 
   struct TimerCtx {
@@ -124,6 +131,7 @@ private:
 
   struct IsrEvent {
     Source source;
+    uint8_t id;
   };
 
   static void IRAM_ATTR _gpio_isr(void *arg);
@@ -141,7 +149,7 @@ private:
   esp_err_t _rm_isr_handlers();
 
   void _handle_cap1203_irq();
-  void _handle_physical_irq();
+  void _handle_physical_irq(uint8_t id);
 
   void _emit(Event ev, const Payload &p);
 
@@ -157,10 +165,10 @@ private:
   bool task_suspended_;
 
   IsrCtx cap_isr_;
-  IsrCtx phy_isr_;
+  IsrCtx phy_isr_[2];
 
   TimerCtx touch_timer_ctx_[3];
-  TimerCtx physical_timer_ctx_;
+  TimerCtx physical_timer_ctx_[2];
 
   // Touch state.
   uint8_t last_touch_mask_;
@@ -169,11 +177,11 @@ private:
   esp_timer_handle_t touch_long_timer_[3];
 
   // Physical button state.
-  bool physical_pressed_;
-  uint32_t physical_last_change_ms_;
-  uint32_t physical_press_ms_;
-  bool physical_long_fired_;
-  esp_timer_handle_t physical_long_timer_;
+  bool physical_pressed_[2];
+  uint32_t physical_last_change_ms_[2];
+  uint32_t physical_press_ms_[2];
+  bool physical_long_fired_[2];
+  esp_timer_handle_t physical_long_timer_[2];
 };
 
 #endif // AIRGRADIENT_GO_MAIN_BUTTON_SERVICE_H

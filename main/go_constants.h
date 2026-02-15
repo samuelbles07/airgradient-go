@@ -92,8 +92,11 @@ static constexpr int GO_I2C_GLITCH_IGNORE_CNT = 7;
 static constexpr bool GO_I2C_INTERNAL_PULLUPS = true;
 
 // Button service wiring.
-static constexpr gpio_num_t GO_BUTTON_PHYSICAL_GPIO = GPIO_NUM_5;
-static constexpr bool GO_BUTTON_PHYSICAL_ACTIVE_LOW = true;
+static constexpr gpio_num_t GO_BUTTON_QON_GPIO = GPIO_NUM_5;
+static constexpr bool GO_BUTTON_QON_ACTIVE_LOW = true;
+
+static constexpr gpio_num_t GO_BUTTON_BOOT_GPIO = GPIO_NUM_28;
+static constexpr bool GO_BUTTON_BOOT_ACTIVE_LOW = true;
 
 static constexpr gpio_num_t GO_TOUCH_ALERT_GPIO = GPIO_NUM_1;
 static constexpr bool GO_TOUCH_ALERT_ACTIVE_LOW = true;

@@ -157,10 +157,12 @@ extern "C" void app_main(void) {
   init_sps30_sensor(bus_handle);
 
   ButtonService::Config bcfg;
-  bcfg.physical_gpio = GPIO_QON;
+  bcfg.qon_gpio = GPIO_QON;
+  bcfg.boot_gpio = GPIO_NUM_28;
   bcfg.cap_alert_gpio = GPIO_ALERT_TOUCH;
   bcfg.cap_alert_active_low = true;
-  bcfg.physical_active_low = true;
+  bcfg.qon_active_low = true;
+  bcfg.boot_active_low = true;
   bcfg.debounce_ms = 200;
   bcfg.long_press_ms = 2500;
   ButtonService buttonService(bus_handle, bcfg);
