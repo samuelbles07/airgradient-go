@@ -44,6 +44,7 @@
 
 // NOTE: Temporary constants
 #define NO_INACTIVE_NO_SLEEP 1
+#define TRACKING_DISPLAY_SLEEP 0
 
 enum class State {
   Idle = 0,
@@ -1037,7 +1038,7 @@ private:
         ESP_LOGW(GO_TAG, "shutdown: ui clear_and_sleep failed: %s", esp_err_to_name(err));
       }
       ESP_LOGI(GO_TAG, "shutdown: display clear done (%" PRIu32 "ms)", now_ms() - t0);
-    } 
+    }
     // else if (epd_ != nullptr) {
     //   ESP_LOGI(GO_TAG, "shutdown: display clear (raw)");
     //   const uint32_t t0 = now_ms();
@@ -1256,8 +1257,7 @@ private:
         nread = 0;
         err = storage_->read_range_sync(probe, &r, 1, &nread, to);
         if (err != ESP_OK || nread != 1) {
-          ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", probe,
-                   esp_err_to_name(err));
+          ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", probe, esp_err_to_name(err));
           ESP_LOGW(GO_TAG, "sync: failed; keeping log");
           return true;
         }
@@ -1431,7 +1431,7 @@ private:
     if (ui_ != nullptr) {
       (void)ui_->set_syncing(false);
       (void)ui_->set_tracking(false);
-      (void)ui_->set_gps_fixed(false);
+      // (void)ui_->set_gps_fixed(false);
       const esp_err_t ui_err = ui_->refresh();
       if (ui_err != ESP_OK) {
         ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
@@ -1478,18 +1478,27 @@ private:
         (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
       }
 
+#if TRACKING_DISPLAY_SLEEP == 1
       const esp_err_t ui_err = ui_->full_refresh();
       if (ui_err != ESP_OK) {
         ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(ui_err));
       }
+#else
+      const esp_err_t ui_err = ui_->refresh();
+      if (ui_err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
+      }
+#endif
     }
 
+#if TRACKING_DISPLAY_SLEEP == 1
     if (epd_ != nullptr) {
       const esp_err_t err = epd_->deep_sleep();
       if (err != ESP_OK) {
         ESP_LOGW(GO_TAG, "epd deep_sleep failed: %s", esp_err_to_name(err));
       }
     }
+#endif
 
     _tracking_write_record(pm25, gps_ok, d);
     return true;
