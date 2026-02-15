@@ -69,7 +69,7 @@ class DashboardUI {
   static constexpr Rect CO2_VALUE_R = {0, 80, 128, 32};
 
   // Bottom status indicator area (small text).
-  static constexpr Rect STATUS_R = {64, H - 16, 64, 16};
+  static constexpr Rect STATUS_R = {64, H - 35, 64, 16};
 
   static constexpr int GRID_Y = 124;
   static constexpr int ROW_H = 32;
