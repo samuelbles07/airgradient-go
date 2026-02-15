@@ -28,6 +28,19 @@ static void draw_pixel_horizontal_right_lsb(u8g2_t* u8g2, u8g2_uint_t x, u8g2_ui
   }
 }
 
+static void u8g2_ll_hvline_horizontal_right_lsb_nomirror_x(u8g2_t* u8g2, u8g2_uint_t x, u8g2_uint_t y,
+                                                           u8g2_uint_t len, uint8_t dir) {
+  if (dir == 0) {
+    for (u8g2_uint_t i = 0; i < len; i++) {
+      draw_pixel_horizontal_right_lsb(u8g2, x + i, y);
+    }
+  } else {
+    for (u8g2_uint_t i = 0; i < len; i++) {
+      draw_pixel_horizontal_right_lsb(u8g2, x, y + i);
+    }
+  }
+}
+
 // Same memory format as u8g2_ll_hvline_horizontal_right_lsb, but mirrors X while
 // keeping the caller's coordinate system non-mirrored.
 static void u8g2_ll_hvline_horizontal_right_lsb_mirror_x(u8g2_t* u8g2, u8g2_uint_t x, u8g2_uint_t y, u8g2_uint_t len,
@@ -86,7 +99,7 @@ void U8g2Canvas::setup_(uint8_t* buf, size_t buf_len, int w, int h, bool mirror_
 
   const u8g2_cb_t* rot = U8G2_R0;
   u8g2_draw_ll_hvline_cb ll = mirror_x ? u8g2_ll_hvline_horizontal_right_lsb_mirror_x
-                                       : u8g2_ll_hvline_horizontal_right_lsb;
+                                       : u8g2_ll_hvline_horizontal_right_lsb_nomirror_x;
   u8g2_SetupBuffer(&u8g2_, buf_, (uint8_t)(padded_h_ / 8), ll, rot);
 
   // Clamp all drawing to the real height.

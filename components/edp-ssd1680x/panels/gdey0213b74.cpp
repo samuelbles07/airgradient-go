@@ -8,6 +8,13 @@
 
 namespace ssd1680x::panels {
 
+static uint8_t reverse_bits8(uint8_t v) {
+  v = (uint8_t)(((v & 0xF0u) >> 4) | ((v & 0x0Fu) << 4));
+  v = (uint8_t)(((v & 0xCCu) >> 2) | ((v & 0x33u) << 2));
+  v = (uint8_t)(((v & 0xAAu) >> 1) | ((v & 0x55u) << 1));
+  return v;
+}
+
 GDEY0213B74::GDEY0213B74(const ssd1680x::Config& cfg) : ssd1680x::Device(cfg) {}
 
 esp_err_t GDEY0213B74::_set_ram_addr_defaults_full() {
@@ -75,6 +82,41 @@ esp_err_t GDEY0213B74::_write_ram(uint8_t ram_cmd, const uint8_t* buf, size_t le
   }
   EDP_RETURN_ON_ERROR(write_cmd(ram_cmd));
   return write_data(buf, len);
+}
+
+esp_err_t GDEY0213B74::_write_ram_maybe_mirror_x(uint8_t ram_cmd, const uint8_t* buf, int w, int h, size_t len) {
+  if (buf == nullptr || len == 0) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (w <= 0 || h <= 0 || (w % 8) != 0) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  const size_t expected = (size_t)(w * h) / 8;
+  if (len != expected) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (!cfg().mirror_x) {
+    return _write_ram(ram_cmd, buf, len);
+  }
+
+  const int bytes_per_row = w / 8;
+  uint8_t rowbuf[WIDTH / 8];
+  if (bytes_per_row > (int)sizeof(rowbuf)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  EDP_RETURN_ON_ERROR(write_cmd(ram_cmd));
+
+  for (int row = 0; row < h; ++row) {
+    const uint8_t* s = buf + (size_t)row * (size_t)bytes_per_row;
+    for (int i = 0; i < bytes_per_row; ++i) {
+      rowbuf[i] = reverse_bits8(s[bytes_per_row - 1 - i]);
+    }
+    EDP_RETURN_ON_ERROR(write_data(rowbuf, (size_t)bytes_per_row));
+  }
+
+  return ESP_OK;
 }
 
 esp_err_t GDEY0213B74::_set_window(uint8_t x_start_bytes, uint8_t x_end_bytes, uint16_t y_start,
@@ -238,7 +280,7 @@ esp_err_t GDEY0213B74::display_frame_bw(const uint8_t* buf, size_t len) {
   esp_err_t err = ESP_OK;
   EDP_RETURN_ON_ERROR(bus_acquire());
   EDP_GOTO_ON_ERROR(_prep_full_tx(), out);
-  EDP_GOTO_ON_ERROR(_write_ram(0x24, buf, len), out);
+  EDP_GOTO_ON_ERROR(_write_ram_maybe_mirror_x(0x24, buf, WIDTH, HEIGHT, len), out);
   EDP_GOTO_ON_ERROR(_trigger_update_full_tx(), out);
 
 out:
@@ -258,7 +300,7 @@ esp_err_t GDEY0213B74::display_frame_bw_fast(const uint8_t* buf, size_t len) {
   esp_err_t err = ESP_OK;
   EDP_RETURN_ON_ERROR(bus_acquire());
   EDP_GOTO_ON_ERROR(_prep_full_tx(), out);
-  EDP_GOTO_ON_ERROR(_write_ram(0x24, buf, len), out);
+  EDP_GOTO_ON_ERROR(_write_ram_maybe_mirror_x(0x24, buf, WIDTH, HEIGHT, len), out);
   EDP_GOTO_ON_ERROR(_trigger_update_fast_tx(), out);
 
 out:
@@ -342,8 +384,8 @@ esp_err_t GDEY0213B74::set_basemap_bw(const uint8_t* buf, size_t len) {
   esp_err_t err = ESP_OK;
   EDP_RETURN_ON_ERROR(bus_acquire());
   EDP_GOTO_ON_ERROR(_prep_full_tx(), out);
-  EDP_GOTO_ON_ERROR(_write_ram(0x24, buf, len), out);
-  EDP_GOTO_ON_ERROR(_write_ram(0x26, buf, len), out);
+  EDP_GOTO_ON_ERROR(_write_ram_maybe_mirror_x(0x24, buf, WIDTH, HEIGHT, len), out);
+  EDP_GOTO_ON_ERROR(_write_ram_maybe_mirror_x(0x26, buf, WIDTH, HEIGHT, len), out);
   EDP_GOTO_ON_ERROR(_trigger_update_full_tx(), out);
 
 out:
@@ -363,8 +405,8 @@ esp_err_t GDEY0213B74::set_basemap_bw_fast(const uint8_t* buf, size_t len) {
   esp_err_t err = ESP_OK;
   EDP_RETURN_ON_ERROR(bus_acquire());
   EDP_GOTO_ON_ERROR(_prep_full_tx(), out);
-  EDP_GOTO_ON_ERROR(_write_ram(0x24, buf, len), out);
-  EDP_GOTO_ON_ERROR(_write_ram(0x26, buf, len), out);
+  EDP_GOTO_ON_ERROR(_write_ram_maybe_mirror_x(0x24, buf, WIDTH, HEIGHT, len), out);
+  EDP_GOTO_ON_ERROR(_write_ram_maybe_mirror_x(0x26, buf, WIDTH, HEIGHT, len), out);
   EDP_GOTO_ON_ERROR(_trigger_update_fast_tx(), out);
 
 out:
@@ -436,8 +478,12 @@ esp_err_t GDEY0213B74::partial_write_bw(int x, int y, int w, int h, const uint8_
     return ESP_ERR_INVALID_STATE;
   }
 
-  const uint8_t x_start_bytes = (uint8_t)(x / 8);
-  const uint8_t x_end_bytes = (uint8_t)((x + w) / 8 - 1);
+  int x_use = x;
+  if (cfg().mirror_x) {
+    x_use = WIDTH - w - x;
+  }
+  const uint8_t x_start_bytes = (uint8_t)(x_use / 8);
+  const uint8_t x_end_bytes = (uint8_t)((x_use + w) / 8 - 1);
 
   // Match the full-init memory mapping: controller Y=HEIGHT-1 maps to screen Y=0.
   // With 0x11=0x01 (X++, Y--), writing row-major (top-to-bottom) works as expected
@@ -450,7 +496,7 @@ esp_err_t GDEY0213B74::partial_write_bw(int x, int y, int w, int h, const uint8_
   EDP_RETURN_ON_ERROR(bus_acquire());
   EDP_GOTO_ON_ERROR(_set_window(x_start_bytes, x_end_bytes, y_start_ctrl, y_end_ctrl), out);
   EDP_GOTO_ON_ERROR(_set_cursor(x_start_bytes, y_start_ctrl), out);
-  EDP_GOTO_ON_ERROR(_write_ram(0x24, buf, len), out);
+  EDP_GOTO_ON_ERROR(_write_ram_maybe_mirror_x(0x24, buf, w, h, len), out);
 
 out:
   bus_release();

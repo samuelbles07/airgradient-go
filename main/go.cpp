@@ -379,6 +379,7 @@ static esp_err_t init_display(ui::DashboardUI **ui_out, ssd1680x::panels::GDEY02
 
   ssd1680x::Config cfg;
   cfg.host = GO_SPI_HOST;
+  cfg.mirror_x = true;
   cfg.pins.busy = GO_EPD_BUSY_GPIO;
   cfg.pins.rst = GO_EPD_RST_GPIO;
   cfg.pins.dc = GO_EPD_DC_GPIO;

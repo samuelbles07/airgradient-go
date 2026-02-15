@@ -28,6 +28,11 @@ struct Config {
 
   Pins pins = {};
 
+  // Some panels use a horizontally mirrored RAM-to-glass mapping.
+  // If true, the driver presents a normal left-to-right coordinate system and
+  // mirrors X internally for both full-frame and partial window writes.
+  bool mirror_x = false;
+
   // Busy pin behavior: many Good Display panels use BUSY=1 while busy, 0 when idle.
   int busy_active_level = 1;
 

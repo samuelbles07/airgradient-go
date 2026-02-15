@@ -50,7 +50,7 @@ class DashboardUI {
     int h;
   };
 
-  static constexpr bool MIRROR_X = true;
+  static constexpr bool MIRROR_X = false;
 
   // Extra inset for text drawing to avoid left edge clipping.
   static constexpr int TEXT_INSET = 8;

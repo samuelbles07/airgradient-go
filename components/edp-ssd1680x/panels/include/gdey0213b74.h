@@ -80,6 +80,7 @@ class GDEY0213B74 : public ssd1680x::Device {
   esp_err_t _trigger_update_partial_tx();
 
   esp_err_t _write_ram(uint8_t ram_cmd, const uint8_t* buf, size_t len);
+  esp_err_t _write_ram_maybe_mirror_x(uint8_t ram_cmd, const uint8_t* buf, int w, int h, size_t len);
   esp_err_t _set_window(uint8_t x_start_bytes, uint8_t x_end_bytes, uint16_t y_start, uint16_t y_end);
   esp_err_t _set_cursor(uint8_t x_bytes, uint16_t y);
 
