@@ -1683,6 +1683,17 @@ extern "C" void app_main(void) {
   buscfg.max_transfer_sz = GO_SPI_MAX_TRANSFER_SZ;
   ESP_ERROR_CHECK(spi_bus_initialize(GO_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
+  ui::DashboardUI *ui_ptr = nullptr;
+  ssd1680x::panels::GDEY0213B74 *epd_ptr = nullptr;
+  {
+    const esp_err_t err = init_display(&ui_ptr, &epd_ptr);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "display init failed: %s", esp_err_to_name(err));
+      ui_ptr = nullptr;
+      epd_ptr = nullptr;
+    }
+  }
+
   static NandStorageService storage;
   NandStorageService *storage_ptr = nullptr;
   {
@@ -1760,17 +1771,6 @@ extern "C" void app_main(void) {
     if (err != ESP_OK) {
       ESP_LOGW(GO_TAG, "SPS30 init failed: %s", esp_err_to_name(err));
       sps30 = nullptr;
-    }
-  }
-
-  ui::DashboardUI *ui_ptr = nullptr;
-  ssd1680x::panels::GDEY0213B74 *epd_ptr = nullptr;
-  {
-    const esp_err_t err = init_display(&ui_ptr, &epd_ptr);
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "display init failed: %s", esp_err_to_name(err));
-      ui_ptr = nullptr;
-      epd_ptr = nullptr;
     }
   }
 
