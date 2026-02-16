@@ -742,7 +742,7 @@ private:
       return;
     }
     if (in.button_long) {
-      // _transition(State::Shutdown);
+      _transition(State::Shutdown);
       return;
     }
 
@@ -1090,11 +1090,8 @@ private:
       }
     }
 
-    // esp_deep_sleep_start();
-    // If power doesn't cut immediately, stay halted.
-    while (true) {
-      sleep_ms(1000);
-    }
+    // waiting an actual shutdown from BMS
+    esp_deep_sleep_start();
   }
 
   // ----- Placeholder implementations (fill in later) -----
