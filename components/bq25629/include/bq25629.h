@@ -398,6 +398,19 @@ public:
   esp_err_t is_charging(bool &charging);
 
   /**
+   * @brief Estimate battery state-of-charge (0-100%)
+   *
+   * This is a simple voltage-correlation gauge using VBAT (and IBAT for a basic
+   * load compensation while discharging). It is not a coulomb counter.
+   *
+   * Accuracy is best when battery current is low or after the pack has rested.
+   *
+   * @param percent Output: estimated SOC in percent (0-100)
+   * @return ESP_OK on success
+   */
+  esp_err_t estimate_battery_percent(uint8_t &percent);
+
+  /**
    * @brief Configure JEITA temperature profile
    * 
    * Sets temperature thresholds and charge current limits:

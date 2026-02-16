@@ -38,6 +38,8 @@ class DashboardUI {
   esp_err_t set_pressure_hpa(int v);
   esp_err_t set_altitude_m(int v);
 
+  esp_err_t set_battery_percent(int percent);
+
   esp_err_t set_gps_fixed(bool fixed);
   esp_err_t set_tracking(bool tracking);
   esp_err_t set_syncing(bool syncing);
@@ -63,6 +65,8 @@ class DashboardUI {
   static constexpr Rect CLOCK_R = {0, 0, 48, 16};
   static constexpr Rect PM_VALUE_R = {0, 32, 128, 32};
   static constexpr Rect CO2_VALUE_R = {0, 80, 128, 32};
+
+  static constexpr Rect BATTERY_R = {0, H - 35, W, 16};
 
   // Top-right GPS-fix indicator icon.
   static constexpr Rect GPS_FIX_R = {W - 16, 0, 16, 16};
@@ -93,6 +97,7 @@ class DashboardUI {
   static constexpr size_t CLOCK_BUFSZ = (size_t)(CLOCK_R.w / 8) * (size_t)CLOCK_R.h;
   static constexpr size_t PM_BUFSZ = (size_t)(PM_VALUE_R.w / 8) * (size_t)PM_VALUE_R.h;
   static constexpr size_t CO2_BUFSZ = (size_t)(CO2_VALUE_R.w / 8) * (size_t)CO2_VALUE_R.h;
+  static constexpr size_t BATTERY_BUFSZ = (size_t)(BATTERY_R.w / 8) * (size_t)BATTERY_R.h;
   static constexpr size_t GPS_FIX_BUFSZ = (size_t)(GPS_FIX_R.w / 8) * (size_t)GPS_FIX_R.h;
   static constexpr size_t SYNC_BUFSZ = (size_t)(SYNC_R.w / 8) * (size_t)SYNC_R.h;
   static constexpr size_t TRACKING_BUFSZ = (size_t)(TRACKING_R.w / 8) * (size_t)TRACKING_R.h;
@@ -111,6 +116,7 @@ class DashboardUI {
   uint8_t buf_clock_[CLOCK_BUFSZ];
   uint8_t buf_pm_[PM_BUFSZ];
   uint8_t buf_co2_[CO2_BUFSZ];
+  uint8_t buf_battery_[BATTERY_BUFSZ];
   uint8_t buf_tracking_[TRACKING_BUFSZ];
   uint8_t buf_sync_[SYNC_BUFSZ];
   uint8_t buf_gps_fix_[GPS_FIX_BUFSZ];
@@ -130,6 +136,7 @@ class DashboardUI {
   char nox_[16] = {0};
   char pres_[16] = {0};
   char alt_[16] = {0};
+  char battery_[8] = {'-', '-', '%', '\0'};
 
   bool gps_fixed_ = false;
   bool tracking_ = false;

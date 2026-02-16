@@ -14,6 +14,91 @@ static const char *TAG = "BQ25629";
 
 namespace drivers {
 
+struct SocPoint {
+  uint16_t mv;
+  uint8_t soc;
+};
+
+// Simple Li-ion / LiPo OCV -> SOC table (tunable).
+// Values are approximate for a 1S cell at rest.
+static constexpr SocPoint SOC_LUT[] = {
+    {4200, 100},
+    {4110, 90},
+    {4020, 80},
+    {3940, 70},
+    {3860, 60},
+    {3790, 50},
+    {3720, 40},
+    {3660, 30},
+    {3600, 20},
+    {3450, 10},
+    {3300, 0},
+};
+
+static uint16_t clamp_u16(uint16_t v, uint16_t lo, uint16_t hi) {
+  if (v < lo) {
+    return lo;
+  }
+  if (v > hi) {
+    return hi;
+  }
+  return v;
+}
+
+static uint8_t soc_from_ocv_mv(uint16_t ocv_mv) {
+  const size_t n = sizeof(SOC_LUT) / sizeof(SOC_LUT[0]);
+  if (n == 0) {
+    return 0;
+  }
+
+  if (ocv_mv >= SOC_LUT[0].mv) {
+    return SOC_LUT[0].soc;
+  }
+  if (ocv_mv <= SOC_LUT[n - 1].mv) {
+    return SOC_LUT[n - 1].soc;
+  }
+
+  for (size_t i = 0; i + 1 < n; ++i) {
+    const uint16_t mv_hi = SOC_LUT[i].mv;
+    const uint16_t mv_lo = SOC_LUT[i + 1].mv;
+    if (ocv_mv <= mv_hi && ocv_mv > mv_lo) {
+      const uint8_t soc_hi = SOC_LUT[i].soc;
+      const uint8_t soc_lo = SOC_LUT[i + 1].soc;
+
+      const uint16_t dv = mv_hi - mv_lo;
+      const uint16_t num = ocv_mv - mv_lo;
+      const uint16_t dsoc = (uint16_t)(soc_hi - soc_lo);
+      const uint16_t add = (uint16_t)((uint32_t)num * (uint32_t)dsoc + (dv / 2)) / dv;
+      return (uint8_t)(soc_lo + add);
+    }
+  }
+
+  return 0;
+}
+
+static uint16_t estimate_ocv_mv(uint16_t vbat_mv, int16_t ibat_ma) {
+  // Basic load compensation: OCV ~= VBAT + I*R when discharging.
+  // This is intentionally simple; tune R for your specific cell and wiring.
+  static constexpr uint32_t R_MOHM = 120;
+  static constexpr int MAX_COMP_I_MA = 2000;
+
+  uint16_t ocv_mv = vbat_mv;
+  if (ibat_ma < 0) {
+    int cur_ma = -ibat_ma;
+    if (cur_ma > MAX_COMP_I_MA) {
+      cur_ma = MAX_COMP_I_MA;
+    }
+    uint32_t add_mv = (uint32_t)cur_ma * R_MOHM;
+    add_mv = (add_mv + 500) / 1000;
+    uint32_t tmp = (uint32_t)ocv_mv + add_mv;
+    if (tmp > 5000) {
+      tmp = 5000;
+    }
+    ocv_mv = (uint16_t)tmp;
+  }
+  return ocv_mv;
+}
+
 // I2C timeout
 constexpr int I2C_TIMEOUT_MS = 1000;
 
@@ -524,6 +609,51 @@ esp_err_t BQ25629::is_charging(bool &charging) {
   }
 
   charging = (status != ChargeStatus::NOT_CHARGING);
+  return ESP_OK;
+}
+
+esp_err_t BQ25629::estimate_battery_percent(uint8_t &percent) {
+  BQ25629_ADC_Data adc = {};
+  esp_err_t err = read_adc(adc);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  // Battery not present (or reading invalid): report 0%.
+  if (adc.vbat_mv < 2000) {
+    percent = 0;
+    return ESP_OK;
+  }
+
+  ChargeStatus chg = ChargeStatus::NOT_CHARGING;
+  bool charging = false;
+  err = get_charge_status(chg);
+  if (err == ESP_OK) {
+    if (chg != ChargeStatus::NOT_CHARGING) {
+      charging = true;
+    }
+    if (chg == ChargeStatus::TOPOFF_TIMER_ACTIVE) {
+      percent = 100;
+      return ESP_OK;
+    }
+  }
+
+  uint16_t ocv_mv = adc.vbat_mv;
+  if (!charging) {
+    ocv_mv = estimate_ocv_mv(adc.vbat_mv, adc.ibat_ma);
+  }
+
+  // Clamp to table range to avoid weird values from load/charger effects.
+  const size_t n = sizeof(SOC_LUT) / sizeof(SOC_LUT[0]);
+  const uint16_t ocv_clamped = clamp_u16(ocv_mv, SOC_LUT[n - 1].mv, SOC_LUT[0].mv);
+  uint8_t soc = soc_from_ocv_mv(ocv_clamped);
+
+  // While charging, avoid reporting 100% unless top-off is active.
+  if (charging && soc > 99) {
+    soc = 99;
+  }
+
+  percent = soc;
   return ESP_OK;
 }
 

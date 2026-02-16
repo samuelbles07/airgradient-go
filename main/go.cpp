@@ -678,6 +678,26 @@ private:
     ESP_LOGI(GO_TAG, "clear logs: ok");
   }
 
+  void _update_battery_ui(void) {
+    if (ui_ == nullptr) {
+      return;
+    }
+
+    if (charger_ == nullptr) {
+      (void)ui_->set_battery_percent(-1);
+      return;
+    }
+
+    uint8_t perc = 0;
+    const esp_err_t err = charger_->estimate_battery_percent(perc);
+    if (err != ESP_OK) {
+      (void)ui_->set_battery_percent(-1);
+      return;
+    }
+
+    (void)ui_->set_battery_percent((int)perc);
+  }
+
   void _step(const Inputs &in) {
     switch (_state) {
     case State::Idle:
@@ -1125,6 +1145,9 @@ private:
       (void)ui_->set_syncing(false);
       (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
       (void)ui_->set_pm25_ugm3(pm25);
+
+      _update_battery_ui();
+
       if (gps_ok && d.utc.time_valid) {
         (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
       }
@@ -1481,6 +1504,9 @@ private:
       (void)ui_->set_syncing(false);
       (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
       (void)ui_->set_pm25_ugm3(pm25);
+
+      _update_battery_ui();
+
       if (gps_ok && d.utc.time_valid) {
         (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
       }

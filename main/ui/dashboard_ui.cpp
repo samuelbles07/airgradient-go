@@ -123,6 +123,7 @@ void DashboardUI::render_value_left_(const Rect &r, uint8_t *buf, size_t len, co
 esp_err_t DashboardUI::batch_write_all_() {
   render_text_(CLOCK_R, buf_clock_, sizeof(buf_clock_), clock_, u8g2_font_6x10_tr, false);
   render_text_(PM_VALUE_R, buf_pm_, sizeof(buf_pm_), pm_, u8g2_font_10x20_tn, true);
+  render_text_(BATTERY_R, buf_battery_, sizeof(buf_battery_), battery_, u8g2_font_6x10_tr, true);
 
   {
     U8g2Canvas w;
@@ -182,6 +183,10 @@ esp_err_t DashboardUI::batch_write_all_() {
                               RAW_LEN(PM_VALUE_R));
   if (err != ESP_OK)
     goto out_err;
+  err = epd_.partial_write_bw(BATTERY_R.x, BATTERY_R.y, BATTERY_R.w, BATTERY_R.h, buf_battery_,
+                              RAW_LEN(BATTERY_R));
+  if (err != ESP_OK)
+    goto out_err;
   // err = epd_.partial_write_bw(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, buf_co2_, RAW_LEN(CO2_VALUE_R));
   // if (err != ESP_OK) goto out_err;
   // err = epd_.partial_write_bw(TEMP_R.x, TEMP_R.y, TEMP_R.w, TEMP_R.h, buf_temp_, RAW_LEN(TEMP_R));
@@ -219,6 +224,9 @@ void DashboardUI::render_full_frame_() {
   c.set_font(u8g2_font_10x20_tn);
   c.draw_str_centered(PM_VALUE_R.x, PM_VALUE_R.y, PM_VALUE_R.w, PM_VALUE_R.h, pm_);
   // c.draw_str_centered(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, co2_);
+
+  c.set_font(u8g2_font_6x10_tr);
+  c.draw_str_centered(BATTERY_R.x, BATTERY_R.y, BATTERY_R.w, BATTERY_R.h, battery_);
 
   if (tracking_) {
     c.draw_xbmp(TRACKING_R.x, TRACKING_R.y, TRACKING_R.w, TRACKING_R.h, TRACKING_XBM);
@@ -319,6 +327,19 @@ esp_err_t DashboardUI::set_pressure_hpa(int v) {
 
 esp_err_t DashboardUI::set_altitude_m(int v) {
   snprintf(alt_, sizeof(alt_), "%d M", v);
+  return ESP_OK;
+}
+
+esp_err_t DashboardUI::set_battery_percent(int percent) {
+  if (percent < 0) {
+    strncpy(battery_, "--%", sizeof(battery_));
+    battery_[sizeof(battery_) - 1] = '\0';
+    return ESP_OK;
+  }
+  if (percent > 100) {
+    percent = 100;
+  }
+  snprintf(battery_, sizeof(battery_), "%d%%", percent);
   return ESP_OK;
 }
 
