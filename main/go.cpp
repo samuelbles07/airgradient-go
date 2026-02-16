@@ -836,6 +836,10 @@ private:
       last_vbus_status_ = vbus;
       ESP_LOGI(GO_TAG, "USB-C initial: %s (vbus=%s)", adapter_present ? "plugged" : "unplugged",
                vbus_status_name(vbus));
+
+      if (ui_ != nullptr) {
+        (void)ui_->set_charging(adapter_present);
+      }
       return;
     }
 
@@ -845,6 +849,9 @@ private:
     }
 
     if (adapter_present != usb_c_adapter_present_) {
+      if (ui_ != nullptr) {
+        (void)ui_->set_charging(adapter_present);
+      }
       if (adapter_present) {
         ESP_LOGI(GO_TAG, "USB-C plugged");
         _handle_usb_c_plugged_event();

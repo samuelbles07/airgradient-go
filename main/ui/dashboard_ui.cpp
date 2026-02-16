@@ -34,6 +34,12 @@ static const uint8_t TRACKING_XBM[] = {
     0x10, 0x00, 0x08, 0x00, 0x08, 0x00, 0x08, 0x1E, 0xF0, 0x1F, 0x00, 0x1E, 0x00, 0x0C, 0x00, 0x00,
 };
 
+static const uint8_t CHARGING_ICON[] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x3F, 0xFF, 0x7F, 0x7F, 0xFF, 0x3F, 0xFF, 0x3F, 0xFE,
+    0x3F, 0xFF, 0x3F, 0xFF, 0xBF, 0x7F, 0xFF, 0x3F, 0xFE, 0x1F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+
 DashboardUI::DashboardUI(ssd1680x::panels::GDEY0213B74 &epd) : epd_(epd) {}
 
 esp_err_t DashboardUI::init() {
@@ -127,6 +133,15 @@ esp_err_t DashboardUI::batch_write_all_() {
 
   {
     U8g2Canvas w;
+    w.attach(buf_charging_, sizeof(buf_charging_), CHARGING_R.w, CHARGING_R.h, MIRROR_X);
+    w.clear_white();
+    w.set_color_black();
+    if (charging_) {
+      w.draw_xbmp(0, 0, CHARGING_R.w, CHARGING_R.h, CHARGING_ICON);
+    }
+  }
+  {
+    U8g2Canvas w;
     w.attach(buf_tracking_, sizeof(buf_tracking_), TRACKING_R.w, TRACKING_R.h, MIRROR_X);
     w.clear_white();
     w.set_color_black();
@@ -166,6 +181,10 @@ esp_err_t DashboardUI::batch_write_all_() {
 
   err = epd_.partial_write_bw(CLOCK_R.x, CLOCK_R.y, CLOCK_R.w, CLOCK_R.h, buf_clock_,
                               RAW_LEN(CLOCK_R));
+  if (err != ESP_OK)
+    goto out_err;
+  err = epd_.partial_write_bw(CHARGING_R.x, CHARGING_R.y, CHARGING_R.w, CHARGING_R.h, buf_charging_,
+                              RAW_LEN(CHARGING_R));
   if (err != ESP_OK)
     goto out_err;
   err = epd_.partial_write_bw(TRACKING_R.x, TRACKING_R.y, TRACKING_R.w, TRACKING_R.h, buf_tracking_,
@@ -236,6 +255,9 @@ void DashboardUI::render_full_frame_() {
   }
   if (gps_fixed_) {
     c.draw_xbmp(GPS_FIX_R.x, GPS_FIX_R.y, GPS_FIX_R.w, GPS_FIX_R.h, GPS_FIX_XBM);
+  }
+  if (charging_) {
+    c.draw_xbmp(CHARGING_R.x, CHARGING_R.y, CHARGING_R.w, CHARGING_R.h, CHARGING_ICON);
   }
 
   // c.set_font(u8g2_font_6x10_tr);
@@ -361,6 +383,11 @@ esp_err_t DashboardUI::set_syncing(bool syncing) {
   if (syncing_) {
     tracking_ = false;
   }
+  return ESP_OK;
+}
+
+esp_err_t DashboardUI::set_charging(bool charging) {
+  charging_ = charging;
   return ESP_OK;
 }
 

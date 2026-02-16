@@ -43,6 +43,7 @@ class DashboardUI {
   esp_err_t set_gps_fixed(bool fixed);
   esp_err_t set_tracking(bool tracking);
   esp_err_t set_syncing(bool syncing);
+  esp_err_t set_charging(bool charging);
 
  private:
   struct Rect {
@@ -68,12 +69,11 @@ class DashboardUI {
 
   static constexpr Rect BATTERY_R = {0, H - 35, W, 16};
 
-  // Top-right GPS-fix indicator icon.
-  static constexpr Rect GPS_FIX_R = {W - 16, 0, 16, 16};
-
   // Top-right status icons.
-  static constexpr Rect SYNC_R = {W - 32, 0, 16, 16};
-  static constexpr Rect TRACKING_R = {W - 48, 0, 16, 16};
+  static constexpr Rect CHARGING_R = {W - 16, 0, 16, 16};
+  static constexpr Rect GPS_FIX_R = {W - 32, 0, 16, 16};
+  static constexpr Rect SYNC_R = {W - 48, 0, 16, 16};
+  static constexpr Rect TRACKING_R = {W - 64, 0, 16, 16};
 
   static constexpr int GRID_Y = 124;
   static constexpr int ROW_H = 32;
@@ -98,6 +98,7 @@ class DashboardUI {
   static constexpr size_t PM_BUFSZ = (size_t)(PM_VALUE_R.w / 8) * (size_t)PM_VALUE_R.h;
   static constexpr size_t CO2_BUFSZ = (size_t)(CO2_VALUE_R.w / 8) * (size_t)CO2_VALUE_R.h;
   static constexpr size_t BATTERY_BUFSZ = (size_t)(BATTERY_R.w / 8) * (size_t)BATTERY_R.h;
+  static constexpr size_t CHARGING_BUFSZ = (size_t)(CHARGING_R.w / 8) * (size_t)CHARGING_R.h;
   static constexpr size_t GPS_FIX_BUFSZ = (size_t)(GPS_FIX_R.w / 8) * (size_t)GPS_FIX_R.h;
   static constexpr size_t SYNC_BUFSZ = (size_t)(SYNC_R.w / 8) * (size_t)SYNC_R.h;
   static constexpr size_t TRACKING_BUFSZ = (size_t)(TRACKING_R.w / 8) * (size_t)TRACKING_R.h;
@@ -117,6 +118,7 @@ class DashboardUI {
   uint8_t buf_pm_[PM_BUFSZ];
   uint8_t buf_co2_[CO2_BUFSZ];
   uint8_t buf_battery_[BATTERY_BUFSZ];
+  uint8_t buf_charging_[CHARGING_BUFSZ];
   uint8_t buf_tracking_[TRACKING_BUFSZ];
   uint8_t buf_sync_[SYNC_BUFSZ];
   uint8_t buf_gps_fix_[GPS_FIX_BUFSZ];
@@ -141,6 +143,7 @@ class DashboardUI {
   bool gps_fixed_ = false;
   bool tracking_ = false;
   bool syncing_ = false;
+  bool charging_ = false;
 
   uint32_t refresh_count_ = 0;
   static constexpr uint32_t FAST_BASEMAP_EVERY = 4;    // every 20s at 5s cadence
