@@ -475,6 +475,8 @@ static bool post_request(const std::string &sn, const std::string &data) {
     } else {
       ESP_LOGW(GO_TAG, "http status=%d url=%s (no body)", responseCode, url);
     }
+  } else {
+    ESP_LOGI(GO_TAG, "http status=%d", responseCode);
   }
   esp_http_client_cleanup(client);
   return (responseCode == 200 || responseCode == 201);
