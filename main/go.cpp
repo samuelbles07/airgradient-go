@@ -449,12 +449,33 @@ static bool post_request(const std::string &sn, const std::string &data) {
   esp_http_client_set_header(client, "Content-Type", "application/json");
   esp_http_client_set_post_field(client, data.c_str(), data.length());
 
-  if (esp_http_client_perform(client) != ESP_OK) {
+  const esp_err_t perr = esp_http_client_perform(client);
+  if (perr != ESP_OK) {
+    ESP_LOGW(GO_TAG, "http perform failed (%s)", esp_err_to_name(perr));
     esp_http_client_cleanup(client);
     return false;
   }
 
   const int responseCode = esp_http_client_get_status_code(client);
+  if (responseCode != 200 && responseCode != 201) {
+    static constexpr int MAX_LOG_BODY = 512;
+    char body[MAX_LOG_BODY + 1];
+    int total = 0;
+    while (total < MAX_LOG_BODY) {
+      const int n = esp_http_client_read(client, body + total, MAX_LOG_BODY - total);
+      if (n <= 0) {
+        break;
+      }
+      total += n;
+    }
+    body[total] = '\0';
+
+    if (total > 0) {
+      ESP_LOGW(GO_TAG, "http status=%d url=%s body=%s", responseCode, url, body);
+    } else {
+      ESP_LOGW(GO_TAG, "http status=%d url=%s (no body)", responseCode, url);
+    }
+  }
   esp_http_client_cleanup(client);
   return (responseCode == 200 || responseCode == 201);
 }
