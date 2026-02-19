@@ -17,6 +17,7 @@ set (
     console
     esp_driver_usb_serial_jtag
     bq25629
+    CO2Sensor
 )
 
 set(srcs

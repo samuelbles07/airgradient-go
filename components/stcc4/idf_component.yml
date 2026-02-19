@@ -1,0 +1,12 @@
+version: "1.0.0"
+description: STCC4 CO2 Sensor Driver
+examples:
+  - path: examples
+    description: STCC4 usage examples
+changelog:
+  1.0.0:
+    - Initial release with full STCC4 support
+    - Continuous and single-shot measurement modes
+    - RHT and pressure compensation
+    - Self-test and diagnostics
+    - Forced recalibration support

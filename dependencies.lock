@@ -27,6 +27,6 @@ dependencies:
 direct_dependencies:
 - espressif/spi_nand_flash
 - idf
-manifest_hash: 89d8d0c20f8e4291de6fb967610011c71b113d0d8a9a00651f496a4940b42c0e
+manifest_hash: 736471f7e4b4dba614d0d09eb08f8cc99204b29f2b771d569259b8bcf62bed70
 target: esp32c5
 version: 2.0.0

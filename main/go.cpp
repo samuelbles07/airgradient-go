@@ -45,6 +45,8 @@
 
 #include "SGP41.hpp"
 
+#include "STCC4Sensor.hpp"
+
 // NOTE: Temporary constants
 #define NO_INACTIVE_NO_SLEEP 1
 #define TRACKING_DISPLAY_SLEEP 0
@@ -501,12 +503,13 @@ static void initConsole() {
 class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
-               TVOCNOxSensor *tvoc_nox_sensor,
+               TVOCNOxSensor *tvoc_nox_sensor, CO2Sensor *co2_sensor,
                i2c_master_bus_handle_t i2c_bus, GPSService *gps, ui::DashboardUI *ui,
                ssd1680x::panels::GDEY0213B74 *epd, NandStorageService *storage,
                drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
       : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
-        tvoc_nox_sensor_(tvoc_nox_sensor), i2c_bus_(i2c_bus), gps_(gps), ui_(ui), epd_(epd),
+        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), i2c_bus_(i2c_bus), gps_(gps),
+        ui_(ui), epd_(epd),
         storage_(storage), charger_(charger),
         last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
 
@@ -578,6 +581,7 @@ private:
   QueueHandle_t input_queue_ = nullptr;
   PMSensor *pm_sensor_ = nullptr;
   TVOCNOxSensor *tvoc_nox_sensor_ = nullptr;
+  CO2Sensor *co2_sensor_ = nullptr;
   i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
   ui::DashboardUI *ui_ = nullptr;
@@ -1157,6 +1161,19 @@ private:
       }
     }
 
+    if (co2_sensor_ != nullptr) {
+      CO2Data co2 = {};
+      if (co2_sensor_->read(co2)) {
+        ESP_LOGI(GO_TAG, "co2: %d", co2.co2);
+        if (co2_sensor_->support_temp_hum()) {
+          auto tmp = co2_sensor_->temp_hum_data();
+          ESP_LOGI(GO_TAG, "temp: %.2f ; rhum: %.2f", tmp.temperature, tmp.humidity);
+        }
+      } else {
+        ESP_LOGW(GO_TAG, "CO2 read failed");
+      }
+    }
+
     GPSService::Data d;
     bool gps_ok = false;
     if (gps_ != nullptr) {
@@ -1704,6 +1721,16 @@ extern "C" void app_main(void) {
     }
   }
 
+  CO2Sensor *co2_sensor_ptr = nullptr;
+  static STCC4Sensor stcc4(bus_handle);
+  {
+    if (!stcc4.init()) {
+      ESP_LOGW(GO_TAG, "STCC4 init failed");
+    } else {
+      co2_sensor_ptr = &stcc4;
+    }
+  }
+
   spi_bus_config_t buscfg = {};
   buscfg.mosi_io_num = GO_SPI_MOSI_GPIO;
   buscfg.miso_io_num = GO_SPI_MISO_GPIO;
@@ -1815,8 +1842,8 @@ extern "C" void app_main(void) {
     return;
   }
 
-  GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, bus_handle, gps_ptr,
-                  ui_ptr, epd_ptr, storage_ptr, charger_ptr, wdt_last_reset_ms,
+  GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, co2_sensor_ptr,
+                  bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr, charger_ptr, wdt_last_reset_ms,
                   bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
