@@ -1,9 +1,11 @@
+# Maybe don't directly include "driver" instead "esp_driver_i2c" etc
 set (
     components
     edp-ssd1680x
     driver
     u8g2
     PMSensor
+    TVOCNOxSensor
     freertos
     libnmea
     spi_nand_flash

@@ -43,6 +43,8 @@
 #include "PMSensor.hpp"
 #include "SPS30Sensor.hpp"
 
+#include "SGP41.hpp"
+
 // NOTE: Temporary constants
 #define NO_INACTIVE_NO_SLEEP 1
 #define TRACKING_DISPLAY_SLEEP 0
@@ -499,11 +501,13 @@ static void initConsole() {
 class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
+               TVOCNOxSensor *tvoc_nox_sensor,
                i2c_master_bus_handle_t i2c_bus, GPSService *gps, ui::DashboardUI *ui,
                ssd1680x::panels::GDEY0213B74 *epd, NandStorageService *storage,
                drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
-      : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor), i2c_bus_(i2c_bus),
-        gps_(gps), ui_(ui), epd_(epd), storage_(storage), charger_(charger),
+      : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
+        tvoc_nox_sensor_(tvoc_nox_sensor), i2c_bus_(i2c_bus), gps_(gps), ui_(ui), epd_(epd),
+        storage_(storage), charger_(charger),
         last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
@@ -573,6 +577,7 @@ private:
   ButtonService *buttons_ = nullptr;
   QueueHandle_t input_queue_ = nullptr;
   PMSensor *pm_sensor_ = nullptr;
+  TVOCNOxSensor *tvoc_nox_sensor_ = nullptr;
   i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
   ui::DashboardUI *ui_ = nullptr;
@@ -1142,6 +1147,15 @@ private:
     ESP_LOGI(GO_TAG, "count 2.5: %.1f", pm.pm_25_pc);
     ESP_LOGI(GO_TAG, "count 10: %.1f", pm.pm_10_pc);
 
+    if (tvoc_nox_sensor_ != nullptr) {
+      TVOCNOxData gas = {};
+      if (tvoc_nox_sensor_->read(gas)) {
+        ESP_LOGI(GO_TAG, "tvoc raw: %d", gas.tvoc_raw);
+        ESP_LOGI(GO_TAG, "nox raw: %d", gas.nox_raw);
+      } else {
+        ESP_LOGW(GO_TAG, "TVOC/NOx read failed");
+      }
+    }
 
     GPSService::Data d;
     bool gps_ok = false;
@@ -1680,6 +1694,16 @@ extern "C" void app_main(void) {
     }
   }
 
+  TVOCNOxSensor *tvoc_nox_sensor_ptr = nullptr;
+  static SGP41 sgp41(bus_handle);
+  {
+    if (!sgp41.init()) {
+      ESP_LOGW(GO_TAG, "SGP41 init failed");
+    } else {
+      tvoc_nox_sensor_ptr = &sgp41;
+    }
+  }
+
   spi_bus_config_t buscfg = {};
   buscfg.mosi_io_num = GO_SPI_MOSI_GPIO;
   buscfg.miso_io_num = GO_SPI_MISO_GPIO;
@@ -1791,8 +1815,9 @@ extern "C" void app_main(void) {
     return;
   }
 
-  GoController go(&buttons, input_queue, pm_sensor_ptr, bus_handle, gps_ptr, ui_ptr, epd_ptr,
-                  storage_ptr, charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
+  GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, bus_handle, gps_ptr,
+                  ui_ptr, epd_ptr, storage_ptr, charger_ptr, wdt_last_reset_ms,
+                  bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
