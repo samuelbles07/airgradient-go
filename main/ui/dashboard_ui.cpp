@@ -10,6 +10,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "MeasuresTypes.h"
+
 #include "ui/u8g2_canvas.h"
 
 extern "C" {
@@ -167,12 +169,12 @@ esp_err_t DashboardUI::batch_write_all_() {
       w.draw_xbmp(0, 0, GPS_FIX_R.w, GPS_FIX_R.h, GPS_FIX_XBM);
     }
   }
-  // render_text_(CO2_VALUE_R, buf_co2_, sizeof(buf_co2_), co2_, u8g2_font_10x20_tn, true);
-  // render_value_left_(TEMP_R, buf_temp_, sizeof(buf_temp_), temp_, u8g2_font_6x10_tr);
-  // render_value_left_(HUM_R, buf_hum_, sizeof(buf_hum_), hum_, u8g2_font_6x10_tr);
-  // render_value_left_(TVOC_R, buf_tvoc_, sizeof(buf_tvoc_), tvoc_, u8g2_font_6x10_tr);
-  // render_value_left_(NOX_R, buf_nox_, sizeof(buf_nox_), nox_, u8g2_font_6x10_tr);
-  // render_value_left_(PRES_R, buf_pres_, sizeof(buf_pres_), pres_, u8g2_font_6x10_tr);
+  render_text_(CO2_VALUE_R, buf_co2_, sizeof(buf_co2_), co2_, u8g2_font_10x20_tn, true);
+  render_value_left_(TEMP_R, buf_temp_, sizeof(buf_temp_), temp_, u8g2_font_6x10_tr);
+  render_value_left_(HUM_R, buf_hum_, sizeof(buf_hum_), hum_, u8g2_font_6x10_tr);
+  render_value_left_(TVOC_R, buf_tvoc_, sizeof(buf_tvoc_), tvoc_, u8g2_font_6x10_tr);
+  render_value_left_(NOX_R, buf_nox_, sizeof(buf_nox_), nox_, u8g2_font_6x10_tr);
+  render_value_left_(PRES_R, buf_pres_, sizeof(buf_pres_), pres_, u8g2_font_6x10_tr);
   // render_value_left_(ALT_R, buf_alt_, sizeof(buf_alt_), alt_, u8g2_font_6x10_tr);
 
   esp_err_t err = epd_.partial_begin();
@@ -206,18 +208,18 @@ esp_err_t DashboardUI::batch_write_all_() {
                               RAW_LEN(BATTERY_R));
   if (err != ESP_OK)
     goto out_err;
-  // err = epd_.partial_write_bw(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, buf_co2_, RAW_LEN(CO2_VALUE_R));
-  // if (err != ESP_OK) goto out_err;
-  // err = epd_.partial_write_bw(TEMP_R.x, TEMP_R.y, TEMP_R.w, TEMP_R.h, buf_temp_, RAW_LEN(TEMP_R));
-  // if (err != ESP_OK) goto out_err;
-  // err = epd_.partial_write_bw(HUM_R.x, HUM_R.y, HUM_R.w, HUM_R.h, buf_hum_, RAW_LEN(HUM_R));
-  // if (err != ESP_OK) goto out_err;
-  // err = epd_.partial_write_bw(TVOC_R.x, TVOC_R.y, TVOC_R.w, TVOC_R.h, buf_tvoc_, RAW_LEN(TVOC_R));
-  // if (err != ESP_OK) goto out_err;
-  // err = epd_.partial_write_bw(NOX_R.x, NOX_R.y, NOX_R.w, NOX_R.h, buf_nox_, RAW_LEN(NOX_R));
-  // if (err != ESP_OK) goto out_err;
-  // err = epd_.partial_write_bw(PRES_R.x, PRES_R.y, PRES_R.w, PRES_R.h, buf_pres_, RAW_LEN(PRES_R));
-  // if (err != ESP_OK) goto out_err;
+  err = epd_.partial_write_bw(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, buf_co2_, RAW_LEN(CO2_VALUE_R));
+  if (err != ESP_OK) goto out_err;
+  err = epd_.partial_write_bw(TEMP_R.x, TEMP_R.y, TEMP_R.w, TEMP_R.h, buf_temp_, RAW_LEN(TEMP_R));
+  if (err != ESP_OK) goto out_err;
+  err = epd_.partial_write_bw(HUM_R.x, HUM_R.y, HUM_R.w, HUM_R.h, buf_hum_, RAW_LEN(HUM_R));
+  if (err != ESP_OK) goto out_err;
+  err = epd_.partial_write_bw(TVOC_R.x, TVOC_R.y, TVOC_R.w, TVOC_R.h, buf_tvoc_, RAW_LEN(TVOC_R));
+  if (err != ESP_OK) goto out_err;
+  err = epd_.partial_write_bw(NOX_R.x, NOX_R.y, NOX_R.w, NOX_R.h, buf_nox_, RAW_LEN(NOX_R));
+  if (err != ESP_OK) goto out_err;
+  err = epd_.partial_write_bw(PRES_R.x, PRES_R.y, PRES_R.w, PRES_R.h, buf_pres_, RAW_LEN(PRES_R));
+  if (err != ESP_OK) goto out_err;
   // err = epd_.partial_write_bw(ALT_R.x, ALT_R.y, ALT_R.w, ALT_R.h, buf_alt_, RAW_LEN(ALT_R));
   // if (err != ESP_OK) goto out_err;
 
@@ -242,7 +244,7 @@ void DashboardUI::render_full_frame_() {
 
   c.set_font(u8g2_font_10x20_tn);
   c.draw_str_centered(PM_VALUE_R.x, PM_VALUE_R.y, PM_VALUE_R.w, PM_VALUE_R.h, pm_);
-  // c.draw_str_centered(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, co2_);
+  c.draw_str_centered(CO2_VALUE_R.x, CO2_VALUE_R.y, CO2_VALUE_R.w, CO2_VALUE_R.h, co2_);
 
   c.set_font(u8g2_font_6x10_tr);
   c.draw_str_centered(BATTERY_R.x, BATTERY_R.y, BATTERY_R.w, BATTERY_R.h, battery_);
@@ -260,12 +262,12 @@ void DashboardUI::render_full_frame_() {
     c.draw_xbmp(CHARGING_R.x, CHARGING_R.y, CHARGING_R.w, CHARGING_R.h, CHARGING_ICON);
   }
 
-  // c.set_font(u8g2_font_6x10_tr);
-  // c.draw_str(TEMP_R.x + TEXT_INSET, TEMP_R.y + 2, temp_);
-  // c.draw_str(HUM_R.x + TEXT_INSET, HUM_R.y + 2, hum_);
-  // c.draw_str(TVOC_R.x + TEXT_INSET, TVOC_R.y + 2, tvoc_);
-  // c.draw_str(NOX_R.x + TEXT_INSET, NOX_R.y + 2, nox_);
-  // c.draw_str(PRES_R.x + TEXT_INSET, PRES_R.y + 2, pres_);
+  c.set_font(u8g2_font_6x10_tr);
+  c.draw_str(TEMP_R.x + TEXT_INSET, TEMP_R.y + 2, temp_);
+  c.draw_str(HUM_R.x + TEXT_INSET, HUM_R.y + 2, hum_);
+  c.draw_str(TVOC_R.x + TEXT_INSET, TVOC_R.y + 2, tvoc_);
+  c.draw_str(NOX_R.x + TEXT_INSET, NOX_R.y + 2, nox_);
+  c.draw_str(PRES_R.x + TEXT_INSET, PRES_R.y + 2, pres_);
   // c.draw_str(ALT_R.x + TEXT_INSET, ALT_R.y + 2, alt_);
 }
 
@@ -310,6 +312,9 @@ esp_err_t DashboardUI::set_time_hm(int hh, int mm) {
 }
 
 esp_err_t DashboardUI::set_pm25_ugm3(float v) {
+  if (!(v >= MeasuresRange::MIN_VALID_PM)) {
+    return ESP_OK;
+  }
   // 1 decimal place, avoid -0.0
   if (fabsf(v) < 0.05f)
     v = 0.0f;
@@ -318,31 +323,49 @@ esp_err_t DashboardUI::set_pm25_ugm3(float v) {
 }
 
 esp_err_t DashboardUI::set_co2_ppm(int v) {
+  if (v < MeasuresRange::MIN_VALID_CO2 || v > MeasuresRange::MAX_VALID_CO2) {
+    return ESP_OK;
+  }
   snprintf(co2_, sizeof(co2_), "%d", v);
   return ESP_OK;
 }
 
 esp_err_t DashboardUI::set_temp_c(float v) {
+  if (!(v >= MeasuresRange::MIN_VALID_TEMP && v <= MeasuresRange::MAX_VALID_TEMP)) {
+    return ESP_OK;
+  }
   snprintf(temp_, sizeof(temp_), "%.1f C", (double)v);
   return ESP_OK;
 }
 
 esp_err_t DashboardUI::set_humidity_pct(int v) {
+  if (v < (int)MeasuresRange::MIN_VALID_HUM || v > (int)MeasuresRange::MAX_VALID_HUM) {
+    return ESP_OK;
+  }
   snprintf(hum_, sizeof(hum_), "%d %%", v);
   return ESP_OK;
 }
 
 esp_err_t DashboardUI::set_tvoc(float v) {
-  snprintf(tvoc_, sizeof(tvoc_), "%.1f", (double)v);
+  if (!(v >= (float)MeasuresRange::MIN_VALID_TVOC)) {
+    return ESP_OK;
+  }
+  snprintf(tvoc_, sizeof(tvoc_), "%.0f", (double)v);
   return ESP_OK;
 }
 
 esp_err_t DashboardUI::set_nox(float v) {
-  snprintf(nox_, sizeof(nox_), "%.1f", (double)v);
+  if (!(v >= (float)MeasuresRange::MIN_VALID_NOX)) {
+    return ESP_OK;
+  }
+  snprintf(nox_, sizeof(nox_), "%.0f", (double)v);
   return ESP_OK;
 }
 
 esp_err_t DashboardUI::set_pressure_hpa(int v) {
+  if (v <= 0) {
+    return ESP_OK;
+  }
   snprintf(pres_, sizeof(pres_), "%d HPA", v);
   return ESP_OK;
 }

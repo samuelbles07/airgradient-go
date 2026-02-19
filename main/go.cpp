@@ -2,6 +2,8 @@
 #include <stdint.h>
 
 #include "esp_mac.h"
+#include <memory>
+#include <new>
 #include <string>
 #include <inttypes.h>
 #include <limits.h>
@@ -1203,6 +1205,15 @@ private:
       if (tvoc_nox_sensor_->read(gas)) {
         ESP_LOGI(GO_TAG, "tvoc raw: %d", gas.tvoc_raw);
         ESP_LOGI(GO_TAG, "nox raw: %d", gas.nox_raw);
+
+        if (ui_ != nullptr) {
+          if (gas.is_tvoc_raw_valid()) {
+            (void)ui_->set_tvoc((float)gas.tvoc_raw);
+          }
+          if (gas.is_nox_raw_valid()) {
+            (void)ui_->set_nox((float)gas.nox_raw);
+          }
+        }
       } else {
         ESP_LOGW(GO_TAG, "TVOC/NOx read failed");
       }
@@ -1212,9 +1223,21 @@ private:
       CO2Data co2 = {};
       if (co2_sensor_->read(co2)) {
         ESP_LOGI(GO_TAG, "co2: %d", co2.co2);
+        if (ui_ != nullptr && co2.is_valid()) {
+          (void)ui_->set_co2_ppm(co2.co2);
+        }
         if (co2_sensor_->support_temp_hum()) {
           auto tmp = co2_sensor_->temp_hum_data();
           ESP_LOGI(GO_TAG, "temp: %.2f ; rhum: %.2f", tmp.temperature, tmp.humidity);
+
+          if (ui_ != nullptr) {
+            if (tmp.is_temp_valid()) {
+              (void)ui_->set_temp_c(tmp.temperature);
+            }
+            if (tmp.is_hum_valid()) {
+              (void)ui_->set_humidity_pct((int)lroundf(tmp.humidity));
+            }
+          }
         }
       } else {
         ESP_LOGW(GO_TAG, "CO2 read failed");
@@ -1231,6 +1254,10 @@ private:
           ESP_LOGI(GO_TAG, "dps368: p=%.1fPa", dps.pressure_pa);
         } else if (dps.temp_valid) {
           ESP_LOGI(GO_TAG, "dps368: t=%.2fC", dps.temperature_c);
+        }
+
+        if (ui_ != nullptr && dps.pressure_valid) {
+          (void)ui_->set_pressure_hpa((int)lround(dps.pressure_pa / 100.0));
         }
       } else if (err != ESP_ERR_NOT_FOUND) {
         ESP_LOGW(GO_TAG, "dps368 read failed: %s", esp_err_to_name(err));
@@ -1590,11 +1617,82 @@ private:
       log_gps_data(d);
     }
 
+    // Read additional sensors once (used for both UI + storage).
+    CO2Data co2 = {};
+    bool co2_valid = false;
+    TempHumData th = {};
+    bool th_temp_valid = false;
+    bool th_hum_valid = false;
+    if (co2_sensor_ != nullptr) {
+      if (co2_sensor_->read(co2) && co2.is_valid()) {
+        co2_valid = true;
+        ESP_LOGI(GO_TAG, "co2: %d", co2.co2);
+        if (co2_sensor_->support_temp_hum()) {
+          th = co2_sensor_->temp_hum_data();
+          th_temp_valid = th.is_temp_valid();
+          th_hum_valid = th.is_hum_valid();
+          if (th_temp_valid) {
+            ESP_LOGI(GO_TAG, "temp: %.2f", th.temperature);
+          }
+          if (th_hum_valid) {
+            ESP_LOGI(GO_TAG, "rhum: %.2f", th.humidity);
+          }
+        }
+      }
+    }
+
+    TVOCNOxData gas = {};
+    bool tvoc_valid = false;
+    bool nox_valid = false;
+    if (tvoc_nox_sensor_ != nullptr) {
+      if (tvoc_nox_sensor_->read(gas)) {
+        tvoc_valid = gas.is_tvoc_raw_valid();
+        nox_valid = gas.is_nox_raw_valid();
+        if (tvoc_valid) {
+          ESP_LOGI(GO_TAG, "tvoc raw: %d", gas.tvoc_raw);
+        }
+        if (nox_valid) {
+          ESP_LOGI(GO_TAG, "nox raw: %d", gas.nox_raw);
+        }
+      }
+    }
+
+    dps368_data_t dps = {};
+    bool pressure_valid = false;
+    if (dps368_ != nullptr) {
+      const esp_err_t err = dps368_read(dps368_, &dps);
+      if (err == ESP_OK && dps.pressure_valid) {
+        pressure_valid = true;
+        ESP_LOGI(GO_TAG, "pressure: %.1fPa", dps.pressure_pa);
+      }
+    }
+
     if (ui_ != nullptr) {
       (void)ui_->set_tracking(true);
       (void)ui_->set_syncing(false);
       (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
       (void)ui_->set_pm25_ugm3(pm.pm_25);
+
+      if (co2_valid) {
+        (void)ui_->set_co2_ppm(co2.co2);
+        if (th_temp_valid) {
+          (void)ui_->set_temp_c(th.temperature);
+        }
+        if (th_hum_valid) {
+          (void)ui_->set_humidity_pct((int)lroundf(th.humidity));
+        }
+      }
+
+      if (tvoc_valid) {
+        (void)ui_->set_tvoc((float)gas.tvoc_raw);
+      }
+      if (nox_valid) {
+        (void)ui_->set_nox((float)gas.nox_raw);
+      }
+
+      if (pressure_valid) {
+        (void)ui_->set_pressure_hpa((int)lround(dps.pressure_pa / 100.0));
+      }
 
       _update_battery_ui();
 
@@ -1659,47 +1757,28 @@ private:
 
     // CO2 + temperature/humidity.
     if (co2_sensor_ != nullptr) {
-      CO2Data co2 = {};
-      if (co2_sensor_->read(co2) && co2.is_valid()) {
+      if (co2_valid) {
         rec.co2_ppm = go_utils::u16_from_int_nonneg(co2.co2);
-        ESP_LOGI(GO_TAG, "co2: %d", co2.co2);
-        if (co2_sensor_->support_temp_hum()) {
-          const TempHumData th = co2_sensor_->temp_hum_data();
-          if (th.is_temp_valid()) {
-            rec.temperature_c_x100 = go_utils::temp_c_to_x100(th.temperature);
-            ESP_LOGI(GO_TAG, "temp: %.2f", th.temperature);
-          }
-          if (th.is_hum_valid()) {
-            rec.humidity_rh_x100 = go_utils::hum_rh_to_x100(th.humidity);
-            ESP_LOGI(GO_TAG, "rhum: %.2f", th.humidity);
-          }
+        if (th_temp_valid) {
+          rec.temperature_c_x100 = go_utils::temp_c_to_x100(th.temperature);
+        }
+        if (th_hum_valid) {
+          rec.humidity_rh_x100 = go_utils::hum_rh_to_x100(th.humidity);
         }
       }
     }
 
     // Pressure.
-    if (dps368_ != nullptr) {
-      dps368_data_t dps = {};
-      const esp_err_t err = dps368_read(dps368_, &dps);
-      if (err == ESP_OK && dps.pressure_valid) {
-        rec.pressure_pa = go_utils::pressure_pa_from_float(dps.pressure_pa);
-        ESP_LOGI(GO_TAG, "pressure: %.1fPa", dps.pressure_pa);
-      }
+    if (pressure_valid) {
+      rec.pressure_pa = go_utils::pressure_pa_from_float(dps.pressure_pa);
     }
 
     // TVOC/NOx.
-    if (tvoc_nox_sensor_ != nullptr) {
-      TVOCNOxData gas = {};
-      if (tvoc_nox_sensor_->read(gas)) {
-        if (gas.is_tvoc_raw_valid()) {
-          rec.tvoc_raw = go_utils::u16_from_int_nonneg(gas.tvoc_raw);
-          ESP_LOGI(GO_TAG, "tvoc raw: %d", gas.tvoc_raw);
-        }
-        if (gas.is_nox_raw_valid()) {
-          rec.nox_raw = go_utils::u16_from_int_nonneg(gas.nox_raw);
-          ESP_LOGI(GO_TAG, "nox raw: %d", gas.nox_raw);
-        }
-      }
+    if (tvoc_valid) {
+      rec.tvoc_raw = go_utils::u16_from_int_nonneg(gas.tvoc_raw);
+    }
+    if (nox_valid) {
+      rec.nox_raw = go_utils::u16_from_int_nonneg(gas.nox_raw);
     }
 
     if (gps_ok && d.fix_valid) {
