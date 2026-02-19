@@ -40,7 +40,8 @@
 #include "gdey0213b74.h"
 #include "ui/dashboard_ui.h"
 
-#include "sps30.h"
+#include "PMSensor.hpp"
+#include "SPS30Sensor.hpp"
 
 // NOTE: Temporary constants
 #define NO_INACTIVE_NO_SLEEP 1
@@ -258,12 +259,7 @@ static bool is_usb_c_adapter_present(drivers::VBusStatus s) {
   return false;
 }
 
-static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_handle_t *out) {
-  if (out == nullptr) {
-    return ESP_ERR_INVALID_ARG;
-  }
-  *out = nullptr;
-
+static esp_err_t pm_power_on(void) {
   gpio_config_t io_conf = {};
   io_conf.intr_type = GPIO_INTR_DISABLE;
   io_conf.mode = GPIO_MODE_OUTPUT;
@@ -277,23 +273,6 @@ static esp_err_t init_sps30_sensor(i2c_master_bus_handle_t bus_handle, sps30_han
 
   (void)gpio_set_level(GO_PM_POWER_GPIO, GO_PM_POWER_ON_LEVEL);
   sleep_ms(GO_SPS30_POWER_STABILIZE_DELAY_MS);
-
-  sps30_config_t cfg = {};
-  cfg.i2c_address = GO_SPS30_I2C_ADDRESS;
-  cfg.i2c_clock_speed = GO_SPS30_I2C_CLOCK_SPEED_HZ;
-
-  err = sps30_init(bus_handle, &cfg, out);
-  if (err != ESP_OK) {
-    return err;
-  }
-
-  err = sps30_start_measurement(*out);
-  if (err != ESP_OK) {
-    return err;
-  }
-
-  sleep_ms(GO_SPS30_WARMUP_DELAY_MS);
-  ESP_LOGI(GO_TAG, "SPS30 ready");
   return ESP_OK;
 }
 
@@ -519,12 +498,12 @@ static void initConsole() {
 
 class GoController {
 public:
-  GoController(ButtonService *buttons, QueueHandle_t input_queue, sps30_handle_t sps30,
+  GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
                i2c_master_bus_handle_t i2c_bus, GPSService *gps, ui::DashboardUI *ui,
                ssd1680x::panels::GDEY0213B74 *epd, NandStorageService *storage,
                drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
-      : buttons_(buttons), input_queue_(input_queue), sps30_(sps30), i2c_bus_(i2c_bus), gps_(gps),
-        ui_(ui), epd_(epd), storage_(storage), charger_(charger),
+      : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor), i2c_bus_(i2c_bus),
+        gps_(gps), ui_(ui), epd_(epd), storage_(storage), charger_(charger),
         last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
@@ -593,7 +572,7 @@ public:
 private:
   ButtonService *buttons_ = nullptr;
   QueueHandle_t input_queue_ = nullptr;
-  sps30_handle_t sps30_ = nullptr;
+  PMSensor *pm_sensor_ = nullptr;
   i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
   ui::DashboardUI *ui_ = nullptr;
@@ -879,8 +858,8 @@ private:
         ESP_LOGI(GO_TAG, "USB-C plugged");
         _handle_usb_c_plugged_event();
       } else {
-        ESP_LOGW(GO_TAG, "USB-C unplugged: wait PMID to 5V then re-init SPS30");
-        _enable_pmid_wait_and_reinit_sps30("USB-C unplugged");
+        ESP_LOGW(GO_TAG, "USB-C unplugged: wait PMID to 5V then re-init PM sensor");
+        _enable_pmid_wait_and_reinit_pm_sensor("USB-C unplugged");
       }
       usb_c_adapter_present_ = adapter_present;
     }
@@ -898,9 +877,9 @@ private:
     const esp_err_t adc_err = charger_->read_adc(adc);
     if (adc_err == ESP_OK) {
       if (adc.vpmid_mv >= GO_BQ_VPMID_READY_MV) {
-        ESP_LOGI(GO_TAG, "USB-C plugged: PMID=%umV ready, re-initializing SPS30",
+        ESP_LOGI(GO_TAG, "USB-C plugged: PMID=%umV ready, re-initializing PM sensor",
                  (unsigned)adc.vpmid_mv);
-        _reinit_sps30("USB-C plugged");
+        _reinit_pm_sensor("USB-C plugged");
         return;
       }
       ESP_LOGW(GO_TAG, "USB-C plugged: PMID=%umV not ready, enabling PMID boost",
@@ -910,10 +889,10 @@ private:
                esp_err_to_name(adc_err));
     }
 
-    _enable_pmid_wait_and_reinit_sps30("USB-C plugged");
+    _enable_pmid_wait_and_reinit_pm_sensor("USB-C plugged");
   }
 
-  void _enable_pmid_wait_and_reinit_sps30(const char *reason) {
+  void _enable_pmid_wait_and_reinit_pm_sensor(const char *reason) {
     if (charger_ == nullptr) {
       ESP_LOGW(GO_TAG, "PMID wait skipped: charger unavailable");
       return;
@@ -934,7 +913,7 @@ private:
       err = charger_->read_adc(adc);
       if (err == ESP_OK) {
         if (adc.vpmid_mv >= GO_BQ_VPMID_READY_MV) {
-          ESP_LOGI(GO_TAG, "%s: PMID ready %umV, re-initializing SPS30", reason,
+          ESP_LOGI(GO_TAG, "%s: PMID ready %umV, re-initializing PM sensor", reason,
                    (unsigned)adc.vpmid_mv);
           break;
         }
@@ -963,33 +942,25 @@ private:
       sleep_ms(GO_BQ_VPMID_POLL_INTERVAL_MS);
     }
 
-    _reinit_sps30(reason);
+    _reinit_pm_sensor(reason);
   }
 
-  void _reinit_sps30(const char *reason) {
-    if (i2c_bus_ == nullptr) {
-      ESP_LOGW(GO_TAG, "SPS30 re-init skipped: I2C bus unavailable");
+  void _reinit_pm_sensor(const char *reason) {
+    if (pm_sensor_ == nullptr) {
+      ESP_LOGW(GO_TAG, "PM sensor re-init skipped: not configured");
       return;
     }
 
-    if (sps30_ != nullptr) {
-      const esp_err_t del_err = sps30_delete(sps30_);
-      if (del_err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "SPS30 delete failed before re-init: %s", esp_err_to_name(del_err));
-        return;
-      }
-      sps30_ = nullptr;
-    }
+    (void)gpio_set_level(GO_PM_POWER_GPIO, GO_PM_POWER_ON_LEVEL);
+    sleep_ms(GO_SPS30_POWER_STABILIZE_DELAY_MS);
 
-    sps30_handle_t new_sps30 = nullptr;
-    const esp_err_t init_err = init_sps30_sensor(i2c_bus_, &new_sps30);
-    if (init_err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "SPS30 re-init failed (%s): %s", reason, esp_err_to_name(init_err));
+    if (!pm_sensor_->reinit()) {
+      ESP_LOGW(GO_TAG, "PM sensor re-init failed (%s)", reason);
       return;
     }
 
-    sps30_ = new_sps30;
-    ESP_LOGI(GO_TAG, "SPS30 re-initialized (%s)", reason);
+    sleep_ms(GO_SPS30_WARMUP_DELAY_MS);
+    ESP_LOGI(GO_TAG, "PM sensor re-initialized (%s)", reason);
   }
 
   void _state_inactive(const Inputs &in) {
@@ -1147,20 +1118,30 @@ private:
   // ----- Placeholder implementations (fill in later) -----
 
   void _idle_measure_and_display(void) {
-    if (sps30_ == nullptr) {
-      ESP_LOGW(GO_TAG, "SPS30 not initialized");
+    if (pm_sensor_ == nullptr) {
+      ESP_LOGW(GO_TAG, "PM sensor not initialized");
       return;
     }
 
-    sps30_measurement_t m;
-    const esp_err_t err = sps30_read_measurement(sps30_, &m);
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "SPS30 read failed: %s", esp_err_to_name(err));
+    PMData pm = {};
+    if (!pm_sensor_->read(pm)) {
+      ESP_LOGW(GO_TAG, "PM sensor read failed");
       return;
     }
 
-    const float pm25 = m.pm2p5_mass;
-    ESP_LOGI(GO_TAG, "pm25: %.1f", (double)pm25);
+    if (!pm.is_pm_25_valid()) {
+      ESP_LOGW(GO_TAG, "PM2.5 invalid");
+      return;
+    }
+    ESP_LOGI(GO_TAG, "pm25: %.1f", pm.pm_25);
+
+    ESP_LOGI(GO_TAG, "pm1.0: %.1f", pm.pm_01);
+    ESP_LOGI(GO_TAG, "pm10: %.1f", pm.pm_10);
+    ESP_LOGI(GO_TAG, "count 0.5: %.1f", pm.pm_05_pc);
+    ESP_LOGI(GO_TAG, "count 1.0: %.1f", pm.pm_01_pc);
+    ESP_LOGI(GO_TAG, "count 2.5: %.1f", pm.pm_25_pc);
+    ESP_LOGI(GO_TAG, "count 10: %.1f", pm.pm_10_pc);
+
 
     GPSService::Data d;
     bool gps_ok = false;
@@ -1174,7 +1155,7 @@ private:
       (void)ui_->set_tracking(false);
       (void)ui_->set_syncing(false);
       (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
-      (void)ui_->set_pm25_ugm3(pm25);
+      (void)ui_->set_pm25_ugm3(pm.pm_25);
 
       _update_battery_ui();
 
@@ -1506,20 +1487,22 @@ private:
 
   bool _tracking_step(void) {
     // TODO: measure -> save to storage -> display.
-    if (sps30_ == nullptr) {
-      ESP_LOGW(GO_TAG, "SPS30 not initialized");
+    if (pm_sensor_ == nullptr) {
+      ESP_LOGW(GO_TAG, "PM sensor not initialized");
       return true;
     }
 
-    sps30_measurement_t m;
-    const esp_err_t err = sps30_read_measurement(sps30_, &m);
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "SPS30 read failed: %s", esp_err_to_name(err));
+    PMData pm = {};
+    if (!pm_sensor_->read(pm)) {
+      ESP_LOGW(GO_TAG, "PM sensor read failed");
       return true;
     }
 
-    const float pm25 = m.pm2p5_mass;
-    ESP_LOGI(GO_TAG, "pm25: %.1f", (double)pm25);
+    if (!pm.is_pm_25_valid()) {
+      ESP_LOGW(GO_TAG, "PM2.5 invalid");
+      return true;
+    }
+    ESP_LOGI(GO_TAG, "pm25: %.1f", pm.pm_25);
 
     GPSService::Data d;
     bool gps_ok = false;
@@ -1533,7 +1516,7 @@ private:
       (void)ui_->set_tracking(true);
       (void)ui_->set_syncing(false);
       (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
-      (void)ui_->set_pm25_ugm3(pm25);
+      (void)ui_->set_pm25_ugm3(pm.pm_25);
 
       _update_battery_ui();
 
@@ -1563,7 +1546,7 @@ private:
     }
 #endif
 
-    _tracking_write_record(pm25, gps_ok, d);
+    _tracking_write_record(pm.pm_25, gps_ok, d);
     return true;
   }
 
@@ -1788,12 +1771,17 @@ extern "C" void app_main(void) {
     }
   }
 
-  sps30_handle_t sps30 = nullptr;
+  PMSensor *pm_sensor_ptr = nullptr;
+  static SPS30Sensor sps30(bus_handle);
   {
-    const esp_err_t err = init_sps30_sensor(bus_handle, &sps30);
+    esp_err_t err = pm_power_on();
     if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "SPS30 init failed: %s", esp_err_to_name(err));
-      sps30 = nullptr;
+      ESP_LOGW(GO_TAG, "PM sensor power on failed: %s", esp_err_to_name(err));
+    } else if (!sps30.init()) {
+      ESP_LOGW(GO_TAG, "PM sensor init failed");
+    } else {
+      sleep_ms(GO_SPS30_WARMUP_DELAY_MS);
+      pm_sensor_ptr = &sps30;
     }
   }
 
@@ -1803,8 +1791,8 @@ extern "C" void app_main(void) {
     return;
   }
 
-  GoController go(&buttons, input_queue, sps30, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr,
-                  charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
+  GoController go(&buttons, input_queue, pm_sensor_ptr, bus_handle, gps_ptr, ui_ptr, epd_ptr,
+                  storage_ptr, charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
