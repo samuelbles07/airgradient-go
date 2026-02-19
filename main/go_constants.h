@@ -54,7 +54,7 @@ static constexpr uint32_t GO_NAND_READY_WAIT_DELAY_MS = 50;
 static constexpr uint32_t GO_NAND_CMD_TIMEOUT_MS = 5000;
 
 // SYNC behavior.
-static constexpr uint32_t GO_SYNC_BATCH_MAX = 100;
+static constexpr uint32_t GO_SYNC_BATCH_MAX = 40;
 static constexpr uint32_t GO_SYNC_READ_CHUNK = 64;
 static constexpr uint32_t GO_SYNC_CMD_TIMEOUT_MS = 5000;
 

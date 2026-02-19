@@ -1371,6 +1371,14 @@ private:
 
     ESP_LOGI(GO_TAG, "sync: total records=%" PRIu32, total);
 
+    std::unique_ptr<NandStorageService::Record[]> batch_buf(
+        new (std::nothrow) NandStorageService::Record[GO_SYNC_BATCH_MAX]);
+    std::unique_ptr<uint64_t[]> ts_buf(new (std::nothrow) uint64_t[GO_SYNC_BATCH_MAX]);
+    if (!batch_buf || !ts_buf) {
+      ESP_LOGW(GO_TAG, "sync: out of memory allocating batch buffers");
+      return true;
+    }
+
     uint32_t idx = 0;
     bool any_route_sent = false;
 
@@ -1441,8 +1449,8 @@ private:
       uint32_t cur = route_start;
 
       while (route_ok && cur < route_end) {
-        NandStorageService::Record batch[GO_SYNC_BATCH_MAX];
-        uint64_t ts_ms[GO_SYNC_BATCH_MAX];
+        NandStorageService::Record *batch = batch_buf.get();
+        uint64_t *ts_ms = ts_buf.get();
         uint32_t n = 0;
 
         while (n < GO_SYNC_BATCH_MAX && cur < route_end) {
