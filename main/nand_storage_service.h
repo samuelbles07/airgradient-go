@@ -50,13 +50,38 @@ class NandStorageService {
 
   // Record fields (simple for now).
   // Latitude/longitude are degrees * 1e7 (E7 fixed-point).
-  // pm25_ugm3_x10 is ug/m3 * 10.
+  // pm*_ugm3_x10 is ug/m3 * 10.
+  // Particle counts are stored as x10 (unit depends on PM sensor driver).
   struct Record {
     uint32_t id = 0;
     uint64_t timestamp_ms = 0;
-    int32_t latitude_e7 = 0;
-    int32_t longitude_e7 = 0;
-    uint16_t pm25_ugm3_x10 = 0;
+    int32_t latitude_e7 = INT32_MIN;
+    int32_t longitude_e7 = INT32_MIN;
+
+    // PM mass concentrations.
+    uint16_t pm01_ugm3_x10 = 0xFFFF;
+    uint16_t pm25_ugm3_x10 = 0xFFFF;
+    uint16_t pm10_ugm3_x10 = 0xFFFF;
+
+    // Particle counts.
+    uint32_t pc05_x10 = 0xFFFFFFFFu;
+    uint32_t pc10_x10 = 0xFFFFFFFFu;
+    uint32_t pc25_x10 = 0xFFFFFFFFu;
+    uint32_t pc100_x10 = 0xFFFFFFFFu;
+
+    // CO2.
+    uint16_t co2_ppm = 0xFFFF;
+
+    // Ambient temperature/humidity.
+    int16_t temperature_c_x100 = (int16_t)INT16_MIN;
+    uint16_t humidity_rh_x100 = 0xFFFF;
+
+    // Pressure.
+    uint32_t pressure_pa = 0xFFFFFFFFu;
+
+    // VOC/NOx raw signals.
+    uint16_t tvoc_raw = 0xFFFF;
+    uint16_t nox_raw = 0xFFFF;
   };
 
   NandStorageService();

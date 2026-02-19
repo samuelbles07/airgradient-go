@@ -21,7 +21,7 @@ static const char* TAG = "NAND";
 
 // On-disk format.
 static constexpr uint32_t RECORDS_MAGIC = 0x314D4741;  // "AGM1" little-endian.
-static constexpr uint16_t RECORDS_VERSION = 1;
+static constexpr uint16_t RECORDS_VERSION = 2;
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;
@@ -36,7 +36,30 @@ typedef struct __attribute__((packed)) {
   uint64_t timestamp_ms;
   int32_t latitude_e7;
   int32_t longitude_e7;
+
+  // PM.
+  uint16_t pm01_ugm3_x10;
   uint16_t pm25_ugm3_x10;
+  uint16_t pm10_ugm3_x10;
+
+  // Particle counts.
+  uint32_t pc05_x10;
+  uint32_t pc10_x10;
+  uint32_t pc25_x10;
+  uint32_t pc100_x10;
+
+  // CO2 + Temp/Hum.
+  uint16_t co2_ppm;
+  int16_t temperature_c_x100;
+  uint16_t humidity_rh_x100;
+
+  // Pressure.
+  uint32_t pressure_pa;
+
+  // VOC/NOx.
+  uint16_t tvoc_raw;
+  uint16_t nox_raw;
+
   uint16_t crc16;
 } records_disk_t;
 
@@ -228,13 +251,10 @@ static esp_err_t open_and_validate(const char* records_path, WorkerState* st) {
   fclose(rf);
 
   if (hdr_err != ESP_OK || !header_valid(h)) {
-    ESP_LOGW(TAG, "records header invalid; rotating file");
-    char bad_path[96];
-    snprintf(bad_path, sizeof(bad_path), "%s.bad", records_path);
-    (void)remove(bad_path);
-    (void)rename(records_path, bad_path);
-    ESP_RETURN_ON_ERROR(write_new_header(records_path), TAG,
-                        "write_new_header failed");
+    // Old/unknown format: discard file and recreate.
+    ESP_LOGW(TAG, "records header invalid; deleting file");
+    (void)remove(records_path);
+    ESP_RETURN_ON_ERROR(write_new_header(records_path), TAG, "write_new_header failed");
   }
 
   // Truncate partial tail (power-loss partial record).
@@ -669,7 +689,19 @@ void NandStorageService::task_() {
         d.timestamp_ms = cmd.record.timestamp_ms;
         d.latitude_e7 = cmd.record.latitude_e7;
         d.longitude_e7 = cmd.record.longitude_e7;
+        d.pm01_ugm3_x10 = cmd.record.pm01_ugm3_x10;
         d.pm25_ugm3_x10 = cmd.record.pm25_ugm3_x10;
+        d.pm10_ugm3_x10 = cmd.record.pm10_ugm3_x10;
+        d.pc05_x10 = cmd.record.pc05_x10;
+        d.pc10_x10 = cmd.record.pc10_x10;
+        d.pc25_x10 = cmd.record.pc25_x10;
+        d.pc100_x10 = cmd.record.pc100_x10;
+        d.co2_ppm = cmd.record.co2_ppm;
+        d.temperature_c_x100 = cmd.record.temperature_c_x100;
+        d.humidity_rh_x100 = cmd.record.humidity_rh_x100;
+        d.pressure_pa = cmd.record.pressure_pa;
+        d.tvoc_raw = cmd.record.tvoc_raw;
+        d.nox_raw = cmd.record.nox_raw;
         d.crc16 = crc16_ccitt((const uint8_t*)&d, sizeof(d) - sizeof(d.crc16));
 
         const bool ok = fwrite(&d, 1, sizeof(d), st.f) == sizeof(d);
@@ -812,7 +844,19 @@ void NandStorageService::task_() {
           cmd.out_records[read_n].timestamp_ms = d.timestamp_ms;
           cmd.out_records[read_n].latitude_e7 = d.latitude_e7;
           cmd.out_records[read_n].longitude_e7 = d.longitude_e7;
+          cmd.out_records[read_n].pm01_ugm3_x10 = d.pm01_ugm3_x10;
           cmd.out_records[read_n].pm25_ugm3_x10 = d.pm25_ugm3_x10;
+          cmd.out_records[read_n].pm10_ugm3_x10 = d.pm10_ugm3_x10;
+          cmd.out_records[read_n].pc05_x10 = d.pc05_x10;
+          cmd.out_records[read_n].pc10_x10 = d.pc10_x10;
+          cmd.out_records[read_n].pc25_x10 = d.pc25_x10;
+          cmd.out_records[read_n].pc100_x10 = d.pc100_x10;
+          cmd.out_records[read_n].co2_ppm = d.co2_ppm;
+          cmd.out_records[read_n].temperature_c_x100 = d.temperature_c_x100;
+          cmd.out_records[read_n].humidity_rh_x100 = d.humidity_rh_x100;
+          cmd.out_records[read_n].pressure_pa = d.pressure_pa;
+          cmd.out_records[read_n].tvoc_raw = d.tvoc_raw;
+          cmd.out_records[read_n].nox_raw = d.nox_raw;
         }
 
         fclose(rf);

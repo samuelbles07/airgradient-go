@@ -34,6 +34,7 @@
 #include "gps_service.h"
 #include "nand_storage_service.h"
 #include "go_constants.h"
+#include "utils.hpp"
 #include "WiFiManager.h"
 #include "bq25629.h"
 
@@ -124,21 +125,63 @@ static void reset_ext_watchdog(void) {
   (void)gpio_set_level(GO_WDT_GPIO, 0);
 }
 
-static int32_t deg_to_e7(double deg) { return (int32_t)llround(deg * 10000000.0); }
+// Forward declaration (defined later in this file).
+static void format_rfc3339_utc(uint64_t epoch_ms, char *out, size_t out_len);
 
-static uint16_t pm25_to_x10(float ugm3) {
-  if (!(ugm3 >= 0.0f)) {
-    return 0xFFFF;
+static std::string build_measures_payload(const NandStorageService::Record *recs,
+                                          const uint64_t *ts_ms,
+                                          uint32_t n) {
+  if (recs == nullptr || ts_ms == nullptr || n == 0) {
+    return {};
   }
 
-  const int v = (int)lroundf(ugm3 * 10.0f);
-  if (v < 0) {
-    return 0;
+  cJSON *root = cJSON_CreateObject();
+  cJSON *arr = cJSON_CreateArray();
+  cJSON_AddItemToObject(root, "measures", arr);
+
+  for (uint32_t i = 0; i < n; ++i) {
+    cJSON *m = cJSON_CreateObject();
+    char date[32];
+    format_rfc3339_utc(ts_ms[i], date, sizeof(date));
+    cJSON_AddStringToObject(m, "date", date);
+
+    if (recs[i].latitude_e7 != INT32_MIN && recs[i].longitude_e7 != INT32_MIN) {
+      cJSON_AddNumberToObject(m, "lat", (double)recs[i].latitude_e7 / 10000000.0);
+      cJSON_AddNumberToObject(m, "lng", (double)recs[i].longitude_e7 / 10000000.0);
+    }
+
+    go_utils::json_add_u16_x10_if_valid(m, "pm01", recs[i].pm01_ugm3_x10);
+    go_utils::json_add_u16_x10_if_valid(m, "pm02", recs[i].pm25_ugm3_x10);
+    go_utils::json_add_u16_x10_if_valid(m, "pm10", recs[i].pm10_ugm3_x10);
+
+    go_utils::json_add_u32_x10_if_valid(m, "pc05", recs[i].pc05_x10);
+    go_utils::json_add_u32_x10_if_valid(m, "pc10", recs[i].pc10_x10);
+    go_utils::json_add_u32_x10_if_valid(m, "pc25", recs[i].pc25_x10);
+    go_utils::json_add_u32_x10_if_valid(m, "pc100", recs[i].pc100_x10);
+
+    go_utils::json_add_u16_if_valid(m, "co2", recs[i].co2_ppm);
+    go_utils::json_add_i16_x100_if_valid(m, "atmp", recs[i].temperature_c_x100);
+    go_utils::json_add_u16_x100_if_valid(m, "rhum", recs[i].humidity_rh_x100);
+
+    if (recs[i].pressure_pa != 0xFFFFFFFFu) {
+      cJSON_AddNumberToObject(m, "pres", (double)recs[i].pressure_pa / 100.0);
+    }
+
+    go_utils::json_add_u16_if_valid(m, "tvoc_raw", recs[i].tvoc_raw);
+    go_utils::json_add_u16_if_valid(m, "nox_raw", recs[i].nox_raw);
+
+    cJSON_AddNumberToObject(m, "route", (double)recs[i].id);
+    cJSON_AddItemToArray(arr, m);
   }
-  if (v > 65534) {
-    return 65534;
+
+  char *json = cJSON_PrintUnformatted(root);
+  std::string payload;
+  if (json != nullptr) {
+    payload.assign(json);
+    cJSON_free(json);
   }
-  return (uint16_t)v;
+  cJSON_Delete(root);
+  return payload;
 }
 
 static bool utc_to_epoch_ms(const GPSService::UtcTime &utc, uint64_t *out_ms) {
@@ -1438,42 +1481,7 @@ private:
           ts_ms[j] = t;
         }
 
-        // Build JSON payload.
-        cJSON *root = cJSON_CreateObject();
-        cJSON *arr = cJSON_CreateArray();
-        cJSON_AddItemToObject(root, "measures", arr);
-
-        for (uint32_t i = 0; i < n; ++i) {
-          cJSON *m = cJSON_CreateObject();
-          char date[32];
-          format_rfc3339_utc(ts_ms[i], date, sizeof(date));
-          cJSON_AddStringToObject(m, "date", date);
-
-          if (batch[i].latitude_e7 == INT32_MIN || batch[i].longitude_e7 == INT32_MIN) {
-            cJSON_AddNullToObject(m, "lat");
-            cJSON_AddNullToObject(m, "lng");
-          } else {
-            cJSON_AddNumberToObject(m, "lat", (double)batch[i].latitude_e7 / 10000000.0);
-            cJSON_AddNumberToObject(m, "lng", (double)batch[i].longitude_e7 / 10000000.0);
-          }
-
-          if (batch[i].pm25_ugm3_x10 == 0xFFFF) {
-            cJSON_AddNullToObject(m, "pm02");
-          } else {
-            cJSON_AddNumberToObject(m, "pm02", (double)batch[i].pm25_ugm3_x10 / 10.0);
-          }
-
-          cJSON_AddNumberToObject(m, "route", (double)batch[i].id);
-          cJSON_AddItemToArray(arr, m);
-        }
-
-        char *json = cJSON_PrintUnformatted(root);
-        std::string payload;
-        if (json != nullptr) {
-          payload.assign(json);
-          cJSON_free(json);
-        }
-        cJSON_Delete(root);
+        const std::string payload = build_measures_payload(batch, ts_ms, n);
 
         if (payload.empty()) {
           ESP_LOGW(GO_TAG, "sync: json build failed");
@@ -1555,6 +1563,25 @@ private:
     }
     ESP_LOGI(GO_TAG, "pm25: %.1f", pm.pm_25);
 
+    if (pm.is_pm_01_valid()) {
+      ESP_LOGI(GO_TAG, "pm1.0: %.1f", pm.pm_01);
+    }
+    if (pm.is_pm_10_valid()) {
+      ESP_LOGI(GO_TAG, "pm10: %.1f", pm.pm_10);
+    }
+    if (pm.is_pm_05_pc_valid()) {
+      ESP_LOGI(GO_TAG, "count 0.5: %.1f", pm.pm_05_pc);
+    }
+    if (pm.is_pm_01_pc_valid()) {
+      ESP_LOGI(GO_TAG, "count 1.0: %.1f", pm.pm_01_pc);
+    }
+    if (pm.is_pm_25_pc_valid()) {
+      ESP_LOGI(GO_TAG, "count 2.5: %.1f", pm.pm_25_pc);
+    }
+    if (pm.is_pm_10_pc_valid()) {
+      ESP_LOGI(GO_TAG, "count 10: %.1f", pm.pm_10_pc);
+    }
+
     GPSService::Data d;
     bool gps_ok = false;
     if (gps_ != nullptr) {
@@ -1597,36 +1624,100 @@ private:
     }
 #endif
 
-    _tracking_write_record(pm.pm_25, gps_ok, d);
+    NandStorageService::Record rec;
+    rec.id = tracking_session_id_;
+    {
+      uint64_t epoch_ms = 0;
+      if (gps_ok) {
+        (void)utc_to_epoch_ms(d.utc, &epoch_ms);
+      }
+      rec.timestamp_ms = epoch_ms;
+    }
+
+    if (pm.is_pm_01_valid()) {
+      rec.pm01_ugm3_x10 = go_utils::pm_ugm3_to_x10(pm.pm_01);
+    }
+    if (pm.is_pm_25_valid()) {
+      rec.pm25_ugm3_x10 = go_utils::pm_ugm3_to_x10(pm.pm_25);
+    }
+    if (pm.is_pm_10_valid()) {
+      rec.pm10_ugm3_x10 = go_utils::pm_ugm3_to_x10(pm.pm_10);
+    }
+
+    if (pm.is_pm_05_pc_valid()) {
+      rec.pc05_x10 = go_utils::count_to_x10(pm.pm_05_pc);
+    }
+    if (pm.is_pm_01_pc_valid()) {
+      rec.pc10_x10 = go_utils::count_to_x10(pm.pm_01_pc);
+    }
+    if (pm.is_pm_25_pc_valid()) {
+      rec.pc25_x10 = go_utils::count_to_x10(pm.pm_25_pc);
+    }
+    if (pm.is_pm_10_pc_valid()) {
+      rec.pc100_x10 = go_utils::count_to_x10(pm.pm_10_pc);
+    }
+
+    // CO2 + temperature/humidity.
+    if (co2_sensor_ != nullptr) {
+      CO2Data co2 = {};
+      if (co2_sensor_->read(co2) && co2.is_valid()) {
+        rec.co2_ppm = go_utils::u16_from_int_nonneg(co2.co2);
+        ESP_LOGI(GO_TAG, "co2: %d", co2.co2);
+        if (co2_sensor_->support_temp_hum()) {
+          const TempHumData th = co2_sensor_->temp_hum_data();
+          if (th.is_temp_valid()) {
+            rec.temperature_c_x100 = go_utils::temp_c_to_x100(th.temperature);
+            ESP_LOGI(GO_TAG, "temp: %.2f", th.temperature);
+          }
+          if (th.is_hum_valid()) {
+            rec.humidity_rh_x100 = go_utils::hum_rh_to_x100(th.humidity);
+            ESP_LOGI(GO_TAG, "rhum: %.2f", th.humidity);
+          }
+        }
+      }
+    }
+
+    // Pressure.
+    if (dps368_ != nullptr) {
+      dps368_data_t dps = {};
+      const esp_err_t err = dps368_read(dps368_, &dps);
+      if (err == ESP_OK && dps.pressure_valid) {
+        rec.pressure_pa = go_utils::pressure_pa_from_float(dps.pressure_pa);
+        ESP_LOGI(GO_TAG, "pressure: %.1fPa", dps.pressure_pa);
+      }
+    }
+
+    // TVOC/NOx.
+    if (tvoc_nox_sensor_ != nullptr) {
+      TVOCNOxData gas = {};
+      if (tvoc_nox_sensor_->read(gas)) {
+        if (gas.is_tvoc_raw_valid()) {
+          rec.tvoc_raw = go_utils::u16_from_int_nonneg(gas.tvoc_raw);
+          ESP_LOGI(GO_TAG, "tvoc raw: %d", gas.tvoc_raw);
+        }
+        if (gas.is_nox_raw_valid()) {
+          rec.nox_raw = go_utils::u16_from_int_nonneg(gas.nox_raw);
+          ESP_LOGI(GO_TAG, "nox raw: %d", gas.nox_raw);
+        }
+      }
+    }
+
+    if (gps_ok && d.fix_valid) {
+      rec.latitude_e7 = go_utils::deg_to_e7(d.latitude_deg);
+      rec.longitude_e7 = go_utils::deg_to_e7(d.longitude_deg);
+    }
+
+    _tracking_write_record(rec);
     return true;
   }
 
-  void _tracking_write_record(float pm25, bool gps_ok, const GPSService::Data &d) {
+  void _tracking_write_record(const NandStorageService::Record &r) {
     if (storage_ == nullptr) {
       return;
     }
     if (!storage_->is_ready()) {
       ESP_LOGW(GO_TAG, "storage not ready; skip write");
       return;
-    }
-
-    NandStorageService::Record r;
-    r.id = tracking_session_id_;
-    {
-      uint64_t epoch_ms = 0;
-      if (gps_ok) {
-        (void)utc_to_epoch_ms(d.utc, &epoch_ms);
-      }
-      r.timestamp_ms = epoch_ms;
-    }
-    r.pm25_ugm3_x10 = pm25_to_x10(pm25);
-
-    if (gps_ok && d.fix_valid) {
-      r.latitude_e7 = deg_to_e7(d.latitude_deg);
-      r.longitude_e7 = deg_to_e7(d.longitude_deg);
-    } else {
-      r.latitude_e7 = INT32_MIN;
-      r.longitude_e7 = INT32_MIN;
     }
 
     const TickType_t to = pdMS_TO_TICKS(GO_NAND_CMD_TIMEOUT_MS);
