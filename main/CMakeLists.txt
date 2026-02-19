@@ -6,6 +6,7 @@ set (
     u8g2
     PMSensor
     TVOCNOxSensor
+    dps368
     freertos
     libnmea
     spi_nand_flash

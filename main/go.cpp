@@ -47,6 +47,8 @@
 
 #include "STCC4Sensor.hpp"
 
+#include "dps368.h"
+
 // NOTE: Temporary constants
 #define NO_INACTIVE_NO_SLEEP 1
 #define TRACKING_DISPLAY_SLEEP 0
@@ -503,12 +505,13 @@ static void initConsole() {
 class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
-               TVOCNOxSensor *tvoc_nox_sensor, CO2Sensor *co2_sensor,
+               TVOCNOxSensor *tvoc_nox_sensor, CO2Sensor *co2_sensor, dps368_handle_t *dps368,
                i2c_master_bus_handle_t i2c_bus, GPSService *gps, ui::DashboardUI *ui,
                ssd1680x::panels::GDEY0213B74 *epd, NandStorageService *storage,
                drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
       : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
-        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), i2c_bus_(i2c_bus), gps_(gps),
+        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368),
+        i2c_bus_(i2c_bus), gps_(gps),
         ui_(ui), epd_(epd),
         storage_(storage), charger_(charger),
         last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
@@ -582,6 +585,7 @@ private:
   PMSensor *pm_sensor_ = nullptr;
   TVOCNOxSensor *tvoc_nox_sensor_ = nullptr;
   CO2Sensor *co2_sensor_ = nullptr;
+  dps368_handle_t *dps368_ = nullptr;
   i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
   ui::DashboardUI *ui_ = nullptr;
@@ -1174,6 +1178,22 @@ private:
       }
     }
 
+    if (dps368_ != nullptr) {
+      dps368_data_t dps = {};
+      const esp_err_t err = dps368_read(dps368_, &dps);
+      if (err == ESP_OK) {
+        if (dps.pressure_valid && dps.temp_valid) {
+          ESP_LOGI(GO_TAG, "dps368: p=%.1fPa t=%.2fC", dps.pressure_pa, dps.temperature_c);
+        } else if (dps.pressure_valid) {
+          ESP_LOGI(GO_TAG, "dps368: p=%.1fPa", dps.pressure_pa);
+        } else if (dps.temp_valid) {
+          ESP_LOGI(GO_TAG, "dps368: t=%.2fC", dps.temperature_c);
+        }
+      } else if (err != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(GO_TAG, "dps368 read failed: %s", esp_err_to_name(err));
+      }
+    }
+
     GPSService::Data d;
     bool gps_ok = false;
     if (gps_ != nullptr) {
@@ -1700,6 +1720,15 @@ extern "C" void app_main(void) {
   i2c_master_bus_handle_t bus_handle = nullptr;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
 
+  dps368_handle_t *dps368_ptr = nullptr;
+  {
+    const esp_err_t err = dps368_init(bus_handle, DPS368_I2C_ADDR_SDO_VDD, &dps368_ptr);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "DPS368 init failed: %s", esp_err_to_name(err));
+      dps368_ptr = nullptr;
+    }
+  }
+
   drivers::BQ25629 *charger_ptr = nullptr;
   {
     const esp_err_t err = init_charger(bus_handle, &charger_ptr);
@@ -1843,8 +1872,8 @@ extern "C" void app_main(void) {
   }
 
   GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, co2_sensor_ptr,
-                  bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr, charger_ptr, wdt_last_reset_ms,
-                  bq_wdt_last_reset_ms);
+                  dps368_ptr, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr, charger_ptr,
+                  wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
