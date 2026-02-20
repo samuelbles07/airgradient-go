@@ -23,6 +23,7 @@ set (
 
 set(srcs
     "go.cpp"
+    "ble_stream.cpp"
     "button_service.cpp"
     "gps_service.cpp"
     "nand_storage_service.cpp"

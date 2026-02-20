@@ -37,6 +37,7 @@
 #include "nand_storage_service.h"
 #include "go_constants.h"
 #include "utils.hpp"
+#include "ble_stream.h"
 #include "WiFiManager.h"
 #include "bq25629.h"
 
@@ -129,6 +130,90 @@ static void reset_ext_watchdog(void) {
 
 // Forward declaration (defined later in this file).
 static void format_rfc3339_utc(uint64_t epoch_ms, char *out, size_t out_len);
+static const char *state_name(State s);
+
+static std::string build_ble_measure_payload(const NandStorageService::Record &r) {
+  cJSON *m = cJSON_CreateObject();
+  if (m == nullptr) {
+    return {};
+  }
+
+  if (r.timestamp_ms != 0) {
+    char date[32];
+    format_rfc3339_utc(r.timestamp_ms, date, sizeof(date));
+    cJSON_AddStringToObject(m, "date", date);
+  }
+
+  if (r.latitude_e7 != INT32_MIN && r.longitude_e7 != INT32_MIN) {
+    cJSON_AddNumberToObject(m, "lat", (double)r.latitude_e7 / 10000000.0);
+    cJSON_AddNumberToObject(m, "lng", (double)r.longitude_e7 / 10000000.0);
+  }
+
+  go_utils::json_add_u16_x10_if_valid(m, "pm01", r.pm01_ugm3_x10);
+  go_utils::json_add_u16_x10_if_valid(m, "pm02", r.pm25_ugm3_x10);
+  go_utils::json_add_u16_x10_if_valid(m, "pm10", r.pm10_ugm3_x10);
+
+  go_utils::json_add_u32_x10_if_valid(m, "pc05", r.pc05_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pc10", r.pc10_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pc25", r.pc25_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pc100", r.pc100_x10);
+
+  go_utils::json_add_u16_if_valid(m, "co2", r.co2_ppm);
+  go_utils::json_add_i16_x100_if_valid(m, "atmp", r.temperature_c_x100);
+  go_utils::json_add_u16_x100_if_valid(m, "rhum", r.humidity_rh_x100);
+
+  if (r.pressure_pa != 0xFFFFFFFFu) {
+    cJSON_AddNumberToObject(m, "pres", (double)r.pressure_pa / 100.0);
+  }
+
+  go_utils::json_add_u16_if_valid(m, "tvoc_raw", r.tvoc_raw);
+  go_utils::json_add_u16_if_valid(m, "nox_raw", r.nox_raw);
+
+  cJSON_AddNumberToObject(m, "route", (double)r.id);
+
+  char *json = cJSON_PrintUnformatted(m);
+  std::string out;
+  if (json != nullptr) {
+    out.assign(json);
+    cJSON_free(json);
+  }
+  cJSON_Delete(m);
+  return out;
+}
+
+static std::string build_ble_status_payload(State s,
+                                            bool gps_ok,
+                                            const GPSService::Data &gps,
+                                            bool battery_ok,
+                                            int battery_percent,
+                                            bool have_charging,
+                                            bool charging) {
+  cJSON *root = cJSON_CreateObject();
+  if (root == nullptr) {
+    return {};
+  }
+
+  cJSON_AddStringToObject(root, "state", state_name(s));
+  if (gps_ok) {
+    cJSON_AddBoolToObject(root, "gps_fix", gps.fix_valid);
+    cJSON_AddNumberToObject(root, "gps_sats", (double)gps.satellites);
+  }
+  if (battery_ok) {
+    cJSON_AddNumberToObject(root, "battery_percent", (double)battery_percent);
+  }
+  if (have_charging) {
+    cJSON_AddBoolToObject(root, "charging", charging);
+  }
+
+  char *json = cJSON_PrintUnformatted(root);
+  std::string out;
+  if (json != nullptr) {
+    out.assign(json);
+    cJSON_free(json);
+  }
+  cJSON_Delete(root);
+  return out;
+}
 
 static std::string build_measures_payload(const NandStorageService::Record *recs,
                                           const uint64_t *ts_ms,
@@ -551,11 +636,12 @@ class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
                TVOCNOxSensor *tvoc_nox_sensor, CO2Sensor *co2_sensor, dps368_handle_t *dps368,
+               BLEStream *ble,
                i2c_master_bus_handle_t i2c_bus, GPSService *gps, ui::DashboardUI *ui,
                ssd1680x::panels::GDEY0213B74 *epd, NandStorageService *storage,
                drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
       : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
-        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368),
+        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), ble_(ble),
         i2c_bus_(i2c_bus), gps_(gps),
         ui_(ui), epd_(epd),
         storage_(storage), charger_(charger),
@@ -631,6 +717,7 @@ private:
   TVOCNOxSensor *tvoc_nox_sensor_ = nullptr;
   CO2Sensor *co2_sensor_ = nullptr;
   dps368_handle_t *dps368_ = nullptr;
+  BLEStream *ble_ = nullptr;
   i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
   ui::DashboardUI *ui_ = nullptr;
@@ -655,9 +742,58 @@ private:
   bool usb_c_adapter_present_ = false;
   drivers::VBusStatus last_vbus_status_ = drivers::VBusStatus::NO_ADAPTER;
 
+  std::string ble_device_name_;
+
+  bool battery_percent_ok_ = false;
+  int battery_percent_ = -1;
+
+  void _sample_battery_percent(void) {
+    battery_percent_ok_ = false;
+    battery_percent_ = -1;
+    if (charger_ == nullptr) {
+      return;
+    }
+    uint8_t perc = 0;
+    const esp_err_t err = charger_->estimate_battery_percent(perc);
+    if (err != ESP_OK) {
+      return;
+    }
+    battery_percent_ok_ = true;
+    battery_percent_ = (int)perc;
+  }
+
+  void _ble_notify(const NandStorageService::Record &rec, bool gps_ok, const GPSService::Data &gps) {
+    if (ble_ == nullptr) {
+      return;
+    }
+    if (!ble_->is_running()) {
+      return;
+    }
+
+    if (ble_->measures_subscribed()) {
+      const std::string payload = build_ble_measure_payload(rec);
+      ble_->notify_measures(payload);
+    }
+    if (ble_->status_subscribed()) {
+      const std::string payload = build_ble_status_payload(
+          _state, gps_ok, gps, battery_percent_ok_, battery_percent_, charger_vbus_seen_,
+          usb_c_adapter_present_);
+      ble_->notify_status(payload);
+    }
+  }
+
   void _init(void) {
     tracking_session_id_ = RTC_TRACKING_SESSION_ID;
     _serial_number = buildSerialNumber();
+
+    ble_device_name_.clear();
+    if (!_serial_number.empty()) {
+      const size_t n = _serial_number.size();
+      const size_t keep = (n >= 6) ? 6 : n;
+      ble_device_name_ = std::string("AirGradientGo-") + _serial_number.substr(n - keep, keep);
+    } else {
+      ble_device_name_ = "AirGradientGo";
+    }
 
     State last = RTC_LAST_STATE;
     if (!is_valid_rtc_state(last)) {
@@ -682,6 +818,10 @@ private:
 
     ESP_LOGI(GO_TAG, "wake cause=%d last=%s initial=%s", (int)cause, state_name(last),
              state_name(initial));
+
+    if (ble_ != nullptr && initial != State::Sync) {
+      (void)ble_->start(ble_device_name_.c_str());
+    }
     _transition(initial);
   }
 
@@ -743,19 +883,12 @@ private:
       return;
     }
 
-    if (charger_ == nullptr) {
+    if (!battery_percent_ok_) {
       (void)ui_->set_battery_percent(-1);
       return;
     }
 
-    uint8_t perc = 0;
-    const esp_err_t err = charger_->estimate_battery_percent(perc);
-    if (err != ESP_OK) {
-      (void)ui_->set_battery_percent(-1);
-      return;
-    }
-
-    (void)ui_->set_battery_percent((int)perc);
+    (void)ui_->set_battery_percent(battery_percent_);
   }
 
   void _step(const Inputs &in) {
@@ -781,6 +914,15 @@ private:
   void _transition(State next) {
     if (next == _state) {
       return;
+    }
+
+    const State prev = _state;
+    if (ble_ != nullptr) {
+      if (next == State::Sync) {
+        ble_->stop();
+      } else if (prev == State::Sync) {
+        (void)ble_->start(ble_device_name_.c_str());
+      }
     }
 
     ESP_LOGI(GO_TAG, "state %s -> %s", state_name(_state), state_name(next));
@@ -1091,6 +1233,10 @@ private:
   void _shutdown_now(void) {
     ESP_LOGI(GO_TAG, "shutdown: begin");
 
+    if (ble_ != nullptr) {
+      ble_->stop();
+    }
+
     // Ensure we have time to complete slow steps.
     reset_ext_watchdog();
     last_wdt_reset_ms_ = now_ms();
@@ -1200,9 +1346,14 @@ private:
     ESP_LOGI(GO_TAG, "count 2.5: %.1f", pm.pm_25_pc);
     ESP_LOGI(GO_TAG, "count 10: %.1f", pm.pm_10_pc);
 
+    TVOCNOxData gas = {};
+    bool tvoc_valid = false;
+    bool nox_valid = false;
+
     if (tvoc_nox_sensor_ != nullptr) {
-      TVOCNOxData gas = {};
       if (tvoc_nox_sensor_->read(gas)) {
+        tvoc_valid = gas.is_tvoc_raw_valid();
+        nox_valid = gas.is_nox_raw_valid();
         ESP_LOGI(GO_TAG, "tvoc raw: %d", gas.tvoc_raw);
         ESP_LOGI(GO_TAG, "nox raw: %d", gas.nox_raw);
 
@@ -1219,23 +1370,31 @@ private:
       }
     }
 
+    CO2Data co2 = {};
+    bool co2_valid = false;
+    TempHumData th = {};
+    bool th_temp_valid = false;
+    bool th_hum_valid = false;
+
     if (co2_sensor_ != nullptr) {
-      CO2Data co2 = {};
       if (co2_sensor_->read(co2)) {
+        co2_valid = co2.is_valid();
         ESP_LOGI(GO_TAG, "co2: %d", co2.co2);
         if (ui_ != nullptr && co2.is_valid()) {
           (void)ui_->set_co2_ppm(co2.co2);
         }
         if (co2_sensor_->support_temp_hum()) {
-          auto tmp = co2_sensor_->temp_hum_data();
-          ESP_LOGI(GO_TAG, "temp: %.2f ; rhum: %.2f", tmp.temperature, tmp.humidity);
+          th = co2_sensor_->temp_hum_data();
+          th_temp_valid = th.is_temp_valid();
+          th_hum_valid = th.is_hum_valid();
+          ESP_LOGI(GO_TAG, "temp: %.2f ; rhum: %.2f", th.temperature, th.humidity);
 
           if (ui_ != nullptr) {
-            if (tmp.is_temp_valid()) {
-              (void)ui_->set_temp_c(tmp.temperature);
+            if (th_temp_valid) {
+              (void)ui_->set_temp_c(th.temperature);
             }
-            if (tmp.is_hum_valid()) {
-              (void)ui_->set_humidity_pct((int)lroundf(tmp.humidity));
+            if (th_hum_valid) {
+              (void)ui_->set_humidity_pct((int)lroundf(th.humidity));
             }
           }
         }
@@ -1244,10 +1403,13 @@ private:
       }
     }
 
+    dps368_data_t dps = {};
+    bool pressure_valid = false;
+
     if (dps368_ != nullptr) {
-      dps368_data_t dps = {};
       const esp_err_t err = dps368_read(dps368_, &dps);
       if (err == ESP_OK) {
+        pressure_valid = dps.pressure_valid;
         if (dps.pressure_valid && dps.temp_valid) {
           ESP_LOGI(GO_TAG, "dps368: p=%.1fPa t=%.2fC", dps.pressure_pa, dps.temperature_c);
         } else if (dps.pressure_valid) {
@@ -1264,13 +1426,15 @@ private:
       }
     }
 
-    GPSService::Data d;
+    GPSService::Data d = {};
     bool gps_ok = false;
     if (gps_ != nullptr) {
       d = gps_->get();
       gps_ok = true;
       log_gps_data(d);
     }
+
+    _sample_battery_percent();
 
     if (ui_ != nullptr) {
       (void)ui_->set_tracking(false);
@@ -1287,6 +1451,68 @@ private:
       if (ui_err != ESP_OK) {
         ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
       }
+    }
+
+    if (ble_ != nullptr && ble_->is_running() && (ble_->measures_subscribed() || ble_->status_subscribed())) {
+      NandStorageService::Record rec;
+      rec.id = tracking_session_id_;
+
+      uint64_t epoch_ms = 0;
+      if (gps_ok) {
+        (void)utc_to_epoch_ms(d.utc, &epoch_ms);
+      }
+      rec.timestamp_ms = epoch_ms;
+
+      if (pm.is_pm_01_valid()) {
+        rec.pm01_ugm3_x10 = go_utils::pm_ugm3_to_x10(pm.pm_01);
+      }
+      if (pm.is_pm_25_valid()) {
+        rec.pm25_ugm3_x10 = go_utils::pm_ugm3_to_x10(pm.pm_25);
+      }
+      if (pm.is_pm_10_valid()) {
+        rec.pm10_ugm3_x10 = go_utils::pm_ugm3_to_x10(pm.pm_10);
+      }
+
+      if (pm.is_pm_05_pc_valid()) {
+        rec.pc05_x10 = go_utils::count_to_x10(pm.pm_05_pc);
+      }
+      if (pm.is_pm_01_pc_valid()) {
+        rec.pc10_x10 = go_utils::count_to_x10(pm.pm_01_pc);
+      }
+      if (pm.is_pm_25_pc_valid()) {
+        rec.pc25_x10 = go_utils::count_to_x10(pm.pm_25_pc);
+      }
+      if (pm.is_pm_10_pc_valid()) {
+        rec.pc100_x10 = go_utils::count_to_x10(pm.pm_10_pc);
+      }
+
+      if (co2_valid) {
+        rec.co2_ppm = go_utils::u16_from_int_nonneg(co2.co2);
+        if (th_temp_valid) {
+          rec.temperature_c_x100 = go_utils::temp_c_to_x100(th.temperature);
+        }
+        if (th_hum_valid) {
+          rec.humidity_rh_x100 = go_utils::hum_rh_to_x100(th.humidity);
+        }
+      }
+
+      if (pressure_valid) {
+        rec.pressure_pa = go_utils::pressure_pa_from_float(dps.pressure_pa);
+      }
+
+      if (tvoc_valid) {
+        rec.tvoc_raw = go_utils::u16_from_int_nonneg(gas.tvoc_raw);
+      }
+      if (nox_valid) {
+        rec.nox_raw = go_utils::u16_from_int_nonneg(gas.nox_raw);
+      }
+
+      if (gps_ok && d.fix_valid) {
+        rec.latitude_e7 = go_utils::deg_to_e7(d.latitude_deg);
+        rec.longitude_e7 = go_utils::deg_to_e7(d.longitude_deg);
+      }
+
+      _ble_notify(rec, gps_ok, d);
     }
   }
 
@@ -1617,7 +1843,7 @@ private:
       ESP_LOGI(GO_TAG, "count 10: %.1f", pm.pm_10_pc);
     }
 
-    GPSService::Data d;
+    GPSService::Data d = {};
     bool gps_ok = false;
     if (gps_ != nullptr) {
       d = gps_->get();
@@ -1674,6 +1900,8 @@ private:
         ESP_LOGI(GO_TAG, "pressure: %.1fPa", dps.pressure_pa);
       }
     }
+
+    _sample_battery_percent();
 
     if (ui_ != nullptr) {
       (void)ui_->set_tracking(true);
@@ -1793,6 +2021,8 @@ private:
       rec.latitude_e7 = go_utils::deg_to_e7(d.latitude_deg);
       rec.longitude_e7 = go_utils::deg_to_e7(d.longitude_deg);
     }
+
+    _ble_notify(rec, gps_ok, d);
 
     _tracking_write_record(rec);
     return true;
@@ -2049,8 +2279,9 @@ extern "C" void app_main(void) {
     return;
   }
 
+  static BLEStream ble;
   GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, co2_sensor_ptr,
-                  dps368_ptr, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr, charger_ptr,
+                  dps368_ptr, &ble, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr, charger_ptr,
                   wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
