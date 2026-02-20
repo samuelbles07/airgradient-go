@@ -169,8 +169,6 @@ static std::string build_ble_measure_payload(const NandStorageService::Record &r
   go_utils::json_add_u16_if_valid(m, "tvoc_raw", r.tvoc_raw);
   go_utils::json_add_u16_if_valid(m, "nox_raw", r.nox_raw);
 
-  cJSON_AddNumberToObject(m, "route", (double)r.id);
-
   char *json = cJSON_PrintUnformatted(m);
   std::string out;
   if (json != nullptr) {
@@ -187,13 +185,17 @@ static std::string build_ble_status_payload(State s,
                                             bool battery_ok,
                                             int battery_percent,
                                             bool have_charging,
-                                            bool charging) {
+                                            bool charging,
+                                            uint32_t route_id) {
   cJSON *root = cJSON_CreateObject();
   if (root == nullptr) {
     return {};
   }
 
   cJSON_AddStringToObject(root, "state", state_name(s));
+  if (s == State::Tracking) {
+    cJSON_AddNumberToObject(root, "route", (double)route_id);
+  }
   if (gps_ok) {
     cJSON_AddBoolToObject(root, "gps_fix", gps.fix_valid);
     cJSON_AddNumberToObject(root, "gps_sats", (double)gps.satellites);
@@ -777,7 +779,7 @@ private:
     if (ble_->status_subscribed()) {
       const std::string payload = build_ble_status_payload(
           _state, gps_ok, gps, battery_percent_ok_, battery_percent_, charger_vbus_seen_,
-          usb_c_adapter_present_);
+          usb_c_adapter_present_, rec.id);
       ble_->notify_status(payload);
     }
   }
