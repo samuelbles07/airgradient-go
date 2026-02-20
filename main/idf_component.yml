@@ -15,3 +15,4 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   espressif/spi_nand_flash: ^0.16.0
+  h2zero/esp-nimble-cpp: ^2.3.4
