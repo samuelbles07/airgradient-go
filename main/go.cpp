@@ -149,16 +149,18 @@ static std::string build_ble_measure_payload(const NandStorageService::Record &r
     cJSON_AddNumberToObject(m, "lng", (double)r.longitude_e7 / 10000000.0);
   }
 
+  // PM mass (atmospheric)
   go_utils::json_add_u16_x10_if_valid(m, "pm01", r.pm01_ugm3_x10);
   go_utils::json_add_u16_x10_if_valid(m, "pm02", r.pm25_ugm3_x10);
   go_utils::json_add_u16_x10_if_valid(m, "pm10", r.pm10_ugm3_x10);
 
-  go_utils::json_add_u32_x10_if_valid(m, "pc05", r.pc05_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pc10", r.pc10_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pc25", r.pc25_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pc100", r.pc100_x10);
+  // PM counts / bins
+  go_utils::json_add_u32_x10_if_valid(m, "pm005Count", r.pc05_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pm01Count", r.pc10_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pm02Count", r.pc25_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pm10Count", r.pc100_x10);
 
-  go_utils::json_add_u16_if_valid(m, "co2", r.co2_ppm);
+  go_utils::json_add_u16_if_valid(m, "rco2", r.co2_ppm);
   go_utils::json_add_i16_x100_if_valid(m, "atmp", r.temperature_c_x100);
   go_utils::json_add_u16_x100_if_valid(m, "rhum", r.humidity_rh_x100);
 
@@ -166,8 +168,8 @@ static std::string build_ble_measure_payload(const NandStorageService::Record &r
     cJSON_AddNumberToObject(m, "pres", (double)r.pressure_pa / 100.0);
   }
 
-  go_utils::json_add_u16_if_valid(m, "tvoc_raw", r.tvoc_raw);
-  go_utils::json_add_u16_if_valid(m, "nox_raw", r.nox_raw);
+  go_utils::json_add_u16_if_valid(m, "tvocRaw", r.tvoc_raw);
+  go_utils::json_add_u16_if_valid(m, "noxRaw", r.nox_raw);
 
   char *json = cJSON_PrintUnformatted(m);
   std::string out;
@@ -239,16 +241,18 @@ static std::string build_measures_payload(const NandStorageService::Record *recs
       cJSON_AddNumberToObject(m, "lng", (double)recs[i].longitude_e7 / 10000000.0);
     }
 
+    // PM mass (atmospheric)
     go_utils::json_add_u16_x10_if_valid(m, "pm01", recs[i].pm01_ugm3_x10);
     go_utils::json_add_u16_x10_if_valid(m, "pm02", recs[i].pm25_ugm3_x10);
     go_utils::json_add_u16_x10_if_valid(m, "pm10", recs[i].pm10_ugm3_x10);
 
-    go_utils::json_add_u32_x10_if_valid(m, "pc05", recs[i].pc05_x10);
-    go_utils::json_add_u32_x10_if_valid(m, "pc10", recs[i].pc10_x10);
-    go_utils::json_add_u32_x10_if_valid(m, "pc25", recs[i].pc25_x10);
-    go_utils::json_add_u32_x10_if_valid(m, "pc100", recs[i].pc100_x10);
+    // PM counts / bins
+    go_utils::json_add_u32_x10_if_valid(m, "pm005Count", recs[i].pc05_x10);
+    go_utils::json_add_u32_x10_if_valid(m, "pm01Count", recs[i].pc10_x10);
+    go_utils::json_add_u32_x10_if_valid(m, "pm02Count", recs[i].pc25_x10);
+    go_utils::json_add_u32_x10_if_valid(m, "pm10Count", recs[i].pc100_x10);
 
-    go_utils::json_add_u16_if_valid(m, "co2", recs[i].co2_ppm);
+    go_utils::json_add_u16_if_valid(m, "rco2", recs[i].co2_ppm);
     go_utils::json_add_i16_x100_if_valid(m, "atmp", recs[i].temperature_c_x100);
     go_utils::json_add_u16_x100_if_valid(m, "rhum", recs[i].humidity_rh_x100);
 
@@ -256,8 +260,8 @@ static std::string build_measures_payload(const NandStorageService::Record *recs
       cJSON_AddNumberToObject(m, "pres", (double)recs[i].pressure_pa / 100.0);
     }
 
-    go_utils::json_add_u16_if_valid(m, "tvoc_raw", recs[i].tvoc_raw);
-    go_utils::json_add_u16_if_valid(m, "nox_raw", recs[i].nox_raw);
+    go_utils::json_add_u16_if_valid(m, "tvocRaw", recs[i].tvoc_raw);
+    go_utils::json_add_u16_if_valid(m, "noxRaw", recs[i].nox_raw);
 
     cJSON_AddNumberToObject(m, "route", (double)recs[i].id);
     cJSON_AddItemToArray(arr, m);
