@@ -67,7 +67,7 @@ class DashboardUI {
   static constexpr Rect PM_VALUE_R = {0, 32, 128, 32};
   static constexpr Rect CO2_VALUE_R = {0, 80, 128, 32};
 
-  static constexpr Rect BATTERY_R = {0, H - 35, W, 16};
+  static constexpr Rect BATTERY_R = {0, H - 25, W, 16};
 
   // Top-right status icons.
   static constexpr Rect CHARGING_R = {W - 16, 0, 16, 16};

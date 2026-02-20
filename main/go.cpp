@@ -2266,6 +2266,7 @@ extern "C" void app_main(void) {
   bcfg.touch_interrupt_enable_mask = GO_TOUCH_INTERRUPT_ENABLE_MASK;
   bcfg.touch_calibrate = GO_TOUCH_CALIBRATE;
   bcfg.touch_calibrate_mask = GO_TOUCH_CALIBRATE_MASK;
+  bcfg.touch_delta_sense = 0;
 
   ButtonService buttons(bus_handle, bcfg);
   ESP_ERROR_CHECK(buttons.init());
