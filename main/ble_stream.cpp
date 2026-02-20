@@ -7,6 +7,12 @@
 // esp-nimble-cpp
 #include "NimBLEDevice.h"
 
+#include "cJSON.h"
+
+#include <inttypes.h>
+#include <math.h>
+#include <stdio.h>
+
 #include <vector>
 
 static const char* const TAG = "BLEStream";
@@ -14,6 +20,10 @@ static const char* const TAG = "BLEStream";
 static constexpr const char* SERVICE_UUID = "d1c0c0a0-6b48-4b2a-9b1d-59f9f2b0a1e1";
 static constexpr const char* MEASURES_CHAR_UUID = "d1c0c0a1-6b48-4b2a-9b1d-59f9f2b0a1e1";
 static constexpr const char* STATUS_CHAR_UUID = "d1c0c0a2-6b48-4b2a-9b1d-59f9f2b0a1e1";
+static constexpr const char* CONFIG_CHAR_UUID = "d1c0c0a3-6b48-4b2a-9b1d-59f9f2b0a1e1";
+
+static constexpr uint32_t TRACKING_SLEEP_MIN_S = 1;
+static constexpr uint32_t TRACKING_SLEEP_MAX_S = 86400;
 
 class BLEStreamCharCallbacks : public NimBLECharacteristicCallbacks {
  public:
@@ -60,6 +70,40 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
 
     // Belt-and-suspenders: ensure advertising restarts.
     (void)NimBLEDevice::startAdvertising();
+  }
+
+ private:
+  BLEStream* s_ = nullptr;
+};
+
+class BLEStreamConfigCallbacks : public NimBLECharacteristicCallbacks {
+ public:
+  explicit BLEStreamConfigCallbacks(BLEStream* s) : s_(s) {}
+
+  void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
+    (void)connInfo;
+    if (s_ == nullptr || pCharacteristic == nullptr) {
+      return;
+    }
+
+    const NimBLEAttValue v = pCharacteristic->getValue();
+    if (v.size() > 0 && v.c_str() != nullptr) {
+      cJSON* root = cJSON_ParseWithLength(v.c_str(), v.size());
+      if (cJSON_IsObject(root)) {
+        const cJSON* t = cJSON_GetObjectItemCaseSensitive(root, "trackingSleepS");
+        if (cJSON_IsNumber(t)) {
+          const double dv = t->valuedouble;
+          const uint32_t nv = (uint32_t)llround(dv);
+          if ((double)nv == dv && nv >= TRACKING_SLEEP_MIN_S && nv <= TRACKING_SLEEP_MAX_S) {
+            s_->request_tracking_sleep_interval_s_(nv);
+            ESP_LOGI(TAG, "config trackingSleepS=%" PRIu32, nv);
+          }
+        }
+      }
+      cJSON_Delete(root);
+    }
+
+    // Write-only characteristic: nothing to echo.
   }
 
  private:
@@ -120,13 +164,16 @@ esp_err_t BLEStream::start(const char* device_name) {
 
   measures_char_ = service_->createCharacteristic(MEASURES_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
   status_char_ = service_->createCharacteristic(STATUS_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
-  if (measures_char_ == nullptr || status_char_ == nullptr) {
+  config_char_ = service_->createCharacteristic(
+      CONFIG_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR, 128);
+  if (measures_char_ == nullptr || status_char_ == nullptr || config_char_ == nullptr) {
     ESP_LOGW(TAG, "createCharacteristic failed");
     (void)NimBLEDevice::deinit(true);
     server_ = nullptr;
     service_ = nullptr;
     measures_char_ = nullptr;
     status_char_ = nullptr;
+    config_char_ = nullptr;
     return ESP_FAIL;
   }
 
@@ -138,6 +185,11 @@ esp_err_t BLEStream::start(const char* device_name) {
   }
   measures_char_->setCallbacks(measures_cb_);
   status_char_->setCallbacks(status_cb_);
+
+  if (config_cb_ == nullptr) {
+    config_cb_ = new BLEStreamConfigCallbacks(this);
+  }
+  config_char_->setCallbacks(config_cb_);
 
   service_->start();
   server_->start();
@@ -183,8 +235,27 @@ void BLEStream::stop() {
   service_ = nullptr;
   measures_char_ = nullptr;
   status_char_ = nullptr;
+  config_char_ = nullptr;
   running_.store(false);
   ESP_LOGI(TAG, "stopped");
+}
+
+void BLEStream::request_tracking_sleep_interval_s_(uint32_t s) {
+  pending_tracking_sleep_interval_s_.store(s, std::memory_order_relaxed);
+  pending_tracking_sleep_interval_.store(true, std::memory_order_relaxed);
+}
+
+
+bool BLEStream::take_pending_tracking_sleep_interval_s(uint32_t* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  const bool had = pending_tracking_sleep_interval_.exchange(false, std::memory_order_relaxed);
+  if (!had) {
+    return false;
+  }
+  *out = pending_tracking_sleep_interval_s_.load(std::memory_order_relaxed);
+  return true;
 }
 
 void BLEStream::notify_measures(const std::string& json) {

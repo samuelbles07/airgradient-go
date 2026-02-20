@@ -67,6 +67,7 @@ enum class State {
 
 RTC_DATA_ATTR static State RTC_LAST_STATE = State::Idle;
 RTC_DATA_ATTR static uint32_t RTC_TRACKING_SESSION_ID = 0;
+RTC_DATA_ATTR static uint32_t RTC_TRACKING_SLEEP_INTERVAL_S = GO_TRACKING_SLEEP_INTERVAL_S;
 static WiFiManager g_wifiManager;
 
 static bool is_valid_rtc_state(State s) {
@@ -188,13 +189,15 @@ static std::string build_ble_status_payload(State s,
                                             int battery_percent,
                                             bool have_charging,
                                             bool charging,
-                                            uint32_t route_id) {
+                                            uint32_t route_id,
+                                            uint32_t tracking_sleep_s) {
   cJSON *root = cJSON_CreateObject();
   if (root == nullptr) {
     return {};
   }
 
   cJSON_AddStringToObject(root, "state", state_name(s));
+  cJSON_AddNumberToObject(root, "trackingSleepS", (double)tracking_sleep_s);
   if (s == State::Tracking) {
     cJSON_AddNumberToObject(root, "route", (double)route_id);
   }
@@ -708,6 +711,7 @@ public:
   void Run(void) {
     _init();
     while (true) {
+      _apply_ble_config_if_needed();
       _kick_watchdogs_if_needed();
       _poll_usb_c_if_needed();
       Inputs inputs = _poll_inputs();
@@ -733,6 +737,7 @@ private:
 
   uint32_t last_wdt_reset_ms_ = 0;
   uint32_t tracking_session_id_ = 0;
+  uint32_t tracking_sleep_interval_s_ = GO_TRACKING_SLEEP_INTERVAL_S;
   uint32_t last_bq_vbus_poll_ms_ = 0;
   uint32_t last_bq_wdt_reset_ms_ = 0;
 
@@ -768,6 +773,22 @@ private:
     battery_percent_ = (int)perc;
   }
 
+  void _apply_ble_config_if_needed(void) {
+    if (ble_ == nullptr) {
+      return;
+    }
+    uint32_t s = 0;
+    if (!ble_->take_pending_tracking_sleep_interval_s(&s)) {
+      return;
+    }
+    if (s == 0) {
+      return;
+    }
+    tracking_sleep_interval_s_ = s;
+    RTC_TRACKING_SLEEP_INTERVAL_S = s;
+    ESP_LOGI(GO_TAG, "config trackingSleepS=%" PRIu32, (uint32_t)s);
+  }
+
   void _ble_notify(const NandStorageService::Record &rec, bool gps_ok, const GPSService::Data &gps) {
     if (ble_ == nullptr) {
       return;
@@ -783,7 +804,7 @@ private:
     if (ble_->status_subscribed()) {
       const std::string payload = build_ble_status_payload(
           _state, gps_ok, gps, battery_percent_ok_, battery_percent_, charger_vbus_seen_,
-          usb_c_adapter_present_, rec.id);
+          usb_c_adapter_present_, rec.id, tracking_sleep_interval_s_);
       ble_->notify_status(payload);
     }
   }
@@ -791,6 +812,12 @@ private:
   void _init(void) {
     tracking_session_id_ = RTC_TRACKING_SESSION_ID;
     _serial_number = buildSerialNumber();
+
+    tracking_sleep_interval_s_ = RTC_TRACKING_SLEEP_INTERVAL_S;
+    if (tracking_sleep_interval_s_ == 0) {
+      tracking_sleep_interval_s_ = GO_TRACKING_SLEEP_INTERVAL_S;
+      RTC_TRACKING_SLEEP_INTERVAL_S = tracking_sleep_interval_s_;
+    }
 
     ble_device_name_.clear();
     if (!_serial_number.empty()) {
@@ -1587,7 +1614,7 @@ private:
     }
 
     const TickType_t to = pdMS_TO_TICKS(GO_SYNC_CMD_TIMEOUT_MS);
-    const uint64_t interval_ms = (uint64_t)GO_TRACKING_SLEEP_INTERVAL_S * 1000ULL;
+    const uint64_t interval_ms = (uint64_t)tracking_sleep_interval_s_ * 1000ULL;
 
     uint32_t total = 0;
     esp_err_t err = storage_->get_count_sync(&total, to);
@@ -2067,7 +2094,7 @@ private:
   void _tracking_enter_sleep(void) {
 
 #if NO_INACTIVE_NO_SLEEP == 1
-    vTaskDelay(pdMS_TO_TICKS(GO_TRACKING_SLEEP_INTERVAL_S * 1000));
+    vTaskDelay(pdMS_TO_TICKS(tracking_sleep_interval_s_ * 1000));
     return;
 #endif // NO_INACTIVE_NO_SLEEP == 1
 
@@ -2084,7 +2111,7 @@ private:
       ESP_LOGW(GO_TAG, "deep sleep wake config failed: %s", esp_err_to_name(err));
     }
 
-    err = esp_sleep_enable_timer_wakeup((uint64_t)GO_TRACKING_SLEEP_INTERVAL_S * 1000000ULL);
+    err = esp_sleep_enable_timer_wakeup((uint64_t)tracking_sleep_interval_s_ * 1000000ULL);
     if (err != ESP_OK) {
       ESP_LOGW(GO_TAG, "timer wake config failed: %s", esp_err_to_name(err));
     }

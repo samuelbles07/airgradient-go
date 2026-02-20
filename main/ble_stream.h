@@ -16,6 +16,7 @@ class NimBLEService;
 class NimBLECharacteristic;
 class BLEStreamCharCallbacks;
 class BLEStreamServerCallbacks;
+class BLEStreamConfigCallbacks;
 
 // BLEStream: minimal BLE GATT server with two notify characteristics.
 // - measures: JSON object (single sample)
@@ -38,24 +39,34 @@ class BLEStream {
 
   void notify_measures(const std::string& json);
   void notify_status(const std::string& json);
+  bool take_pending_tracking_sleep_interval_s(uint32_t* out);
 
  private:
   friend class BLEStreamCharCallbacks;
   friend class BLEStreamServerCallbacks;
+  friend class BLEStreamConfigCallbacks;
   void set_measures_subscribed_(bool v);
   void set_status_subscribed_(bool v);
+
+  void request_tracking_sleep_interval_s_(uint32_t s);
 
   std::atomic<bool> running_{false};
   std::atomic<bool> measures_subscribed_{false};
   std::atomic<bool> status_subscribed_{false};
 
+  std::atomic<bool> pending_tracking_sleep_interval_{false};
+  std::atomic<uint32_t> pending_tracking_sleep_interval_s_{0};
+
   NimBLEServer* server_ = nullptr;
   NimBLEService* service_ = nullptr;
   NimBLECharacteristic* measures_char_ = nullptr;
   NimBLECharacteristic* status_char_ = nullptr;
+  NimBLECharacteristic* config_char_ = nullptr;
 
   BLEStreamCharCallbacks* measures_cb_ = nullptr;
   BLEStreamCharCallbacks* status_cb_ = nullptr;
+
+  BLEStreamConfigCallbacks* config_cb_ = nullptr;
 
   BLEStreamServerCallbacks* server_cb_ = nullptr;
 };
