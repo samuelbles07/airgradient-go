@@ -173,6 +173,7 @@ static std::string build_ble_measure_payload(const NandStorageService::Record &r
   go_utils::json_add_u32_x10_if_valid(m, "pm10Count", r.pc100_x10);
 
   go_utils::json_add_u16_if_valid(m, "rco2", r.co2_ppm);
+  go_utils::json_add_u16_if_valid(m, "scd4x", r.scd4x);
   go_utils::json_add_i16_x100_if_valid(m, "atmp", r.temperature_c_x100);
   go_utils::json_add_u16_x100_if_valid(m, "rhum", r.humidity_rh_x100);
 
@@ -265,6 +266,9 @@ static std::string build_measures_payload(const NandStorageService::Record *recs
     go_utils::json_add_u32_x10_if_valid(m, "pm01Count", recs[i].pc10_x10);
     go_utils::json_add_u32_x10_if_valid(m, "pm02Count", recs[i].pc25_x10);
     go_utils::json_add_u32_x10_if_valid(m, "pm10Count", recs[i].pc100_x10);
+
+    // Temporary server mapping: SCD4x CO2 is posted as pm003Count
+    go_utils::json_add_u16_if_valid(m, "pm003Count", recs[i].scd4x);
 
     go_utils::json_add_u16_if_valid(m, "rco2", recs[i].co2_ppm);
     go_utils::json_add_i16_x100_if_valid(m, "atmp", recs[i].temperature_c_x100);
@@ -770,6 +774,9 @@ private:
 
   bool battery_percent_ok_ = false;
   int battery_percent_ = -1;
+
+  bool scd4x_last_valid_ = false;
+  uint16_t scd4x_last_ppm_ = 0;
 
   void _sample_battery_percent(void) {
     battery_percent_ok_ = false;
@@ -1453,13 +1460,14 @@ private:
       bool ready = false;
       const int16_t rdy_err = scd4x_get_data_ready_status(&ready);
       if (rdy_err == 0 && ready) {
-        uint16_t co2_ppm = 0;
-        int32_t t_mdeg_c = 0;
-        int32_t rh_mpermil = 0;
-        const int16_t meas_err = scd4x_read_measurement(&co2_ppm, &t_mdeg_c, &rh_mpermil);
-        if (meas_err == 0 && co2_ppm != 0) {
-          ESP_LOGI(GO_TAG, "scd4x: co2=%u t=%.2fC rh=%.2f%%", (unsigned)co2_ppm,
-                   (double)t_mdeg_c / 1000.0, (double)rh_mpermil / 1000.0);
+        uint16_t ppm = 0;
+        uint16_t t_raw = 0;
+        uint16_t rh_raw = 0;
+        const int16_t meas_err = scd4x_read_measurement_raw(&ppm, &t_raw, &rh_raw);
+        if (meas_err == 0 && ppm != 0) {
+          scd4x_last_valid_ = true;
+          scd4x_last_ppm_ = ppm;
+          ESP_LOGI(GO_TAG, "scd4x: co2=%u", (unsigned)ppm);
         } else if (meas_err != 0) {
           ESP_LOGW(GO_TAG, "scd4x read failed: %d", (int)meas_err);
         }
@@ -1557,6 +1565,10 @@ private:
         if (th_hum_valid) {
           rec.humidity_rh_x100 = go_utils::hum_rh_to_x100(th.humidity);
         }
+      }
+
+      if (scd4x_last_valid_) {
+        rec.scd4x = scd4x_last_ppm_;
       }
 
       if (pressure_valid) {
@@ -1942,13 +1954,14 @@ private:
       bool ready = false;
       const int16_t rdy_err = scd4x_get_data_ready_status(&ready);
       if (rdy_err == 0 && ready) {
-        uint16_t scd_co2_ppm = 0;
-        int32_t scd_t_mdeg_c = 0;
-        int32_t scd_rh_mpermil = 0;
-        const int16_t meas_err = scd4x_read_measurement(&scd_co2_ppm, &scd_t_mdeg_c, &scd_rh_mpermil);
-        if (meas_err == 0 && scd_co2_ppm != 0) {
-          ESP_LOGI(GO_TAG, "scd4x: co2=%u t=%.2fC rh=%.2f%%", (unsigned)scd_co2_ppm,
-                   (double)scd_t_mdeg_c / 1000.0, (double)scd_rh_mpermil / 1000.0);
+        uint16_t ppm = 0;
+        uint16_t t_raw = 0;
+        uint16_t rh_raw = 0;
+        const int16_t meas_err = scd4x_read_measurement_raw(&ppm, &t_raw, &rh_raw);
+        if (meas_err == 0 && ppm != 0) {
+          scd4x_last_valid_ = true;
+          scd4x_last_ppm_ = ppm;
+          ESP_LOGI(GO_TAG, "scd4x: co2=%u", (unsigned)ppm);
         } else if (meas_err != 0) {
           ESP_LOGW(GO_TAG, "scd4x read failed: %d", (int)meas_err);
         }
@@ -2082,6 +2095,10 @@ private:
           rec.humidity_rh_x100 = go_utils::hum_rh_to_x100(th.humidity);
         }
       }
+    }
+
+    if (scd4x_last_valid_) {
+      rec.scd4x = scd4x_last_ppm_;
     }
 
     // Pressure.

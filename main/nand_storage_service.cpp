@@ -21,7 +21,7 @@ static const char* TAG = "NAND";
 
 // On-disk format.
 static constexpr uint32_t RECORDS_MAGIC = 0x314D4741;  // "AGM1" little-endian.
-static constexpr uint16_t RECORDS_VERSION = 2;
+static constexpr uint16_t RECORDS_VERSION = 3;
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;
@@ -50,6 +50,7 @@ typedef struct __attribute__((packed)) {
 
   // CO2 + Temp/Hum.
   uint16_t co2_ppm;
+  uint16_t scd4x;
   int16_t temperature_c_x100;
   uint16_t humidity_rh_x100;
 
@@ -697,6 +698,7 @@ void NandStorageService::task_() {
         d.pc25_x10 = cmd.record.pc25_x10;
         d.pc100_x10 = cmd.record.pc100_x10;
         d.co2_ppm = cmd.record.co2_ppm;
+        d.scd4x = cmd.record.scd4x;
         d.temperature_c_x100 = cmd.record.temperature_c_x100;
         d.humidity_rh_x100 = cmd.record.humidity_rh_x100;
         d.pressure_pa = cmd.record.pressure_pa;
@@ -852,6 +854,7 @@ void NandStorageService::task_() {
           cmd.out_records[read_n].pc25_x10 = d.pc25_x10;
           cmd.out_records[read_n].pc100_x10 = d.pc100_x10;
           cmd.out_records[read_n].co2_ppm = d.co2_ppm;
+          cmd.out_records[read_n].scd4x = d.scd4x;
           cmd.out_records[read_n].temperature_c_x100 = d.temperature_c_x100;
           cmd.out_records[read_n].humidity_rh_x100 = d.humidity_rh_x100;
           cmd.out_records[read_n].pressure_pa = d.pressure_pa;
