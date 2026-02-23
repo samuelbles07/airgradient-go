@@ -896,9 +896,7 @@ private:
 
     ble_device_name_.clear();
     if (!_serial_number.empty()) {
-      const size_t n = _serial_number.size();
-      const size_t keep = (n >= 6) ? 6 : n;
-      ble_device_name_ = std::string("AirGradientGo-") + _serial_number.substr(n - keep, keep);
+      ble_device_name_ = std::string("AirGradientGo-") + _serial_number;
     } else {
       ble_device_name_ = "AirGradientGo";
     }
