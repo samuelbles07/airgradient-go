@@ -732,6 +732,7 @@ public:
       _poll_usb_c_if_needed();
       Inputs inputs = _poll_inputs();
       _step(inputs);
+      _ble_status_notify_if_needed();
       sleep_ms(GO_MAIN_LOOP_DELAY_MS);
     }
   }
@@ -761,6 +762,7 @@ private:
   State _state = State::Idle;
   uint32_t _state_enter_ms = 0;
   uint32_t _last_idle_measure_ms = 0;
+  uint32_t _tracking_next_cycle_ms = 0;
   bool _sync_started = false;
   bool _tracking_started = false;
   bool _shutdown_started = false;
@@ -777,6 +779,52 @@ private:
 
   bool scd4x_last_valid_ = false;
   uint16_t scd4x_last_ppm_ = 0;
+
+  bool ble_status_dirty_ = true;
+  bool last_ble_status_subscribed_ = false;
+
+  void _ble_notify_status_now(State s) {
+    if (ble_ == nullptr) {
+      return;
+    }
+    if (!ble_->is_running() || !ble_->status_subscribed()) {
+      return;
+    }
+
+    GPSService::Data d = {};
+    bool gps_ok = false;
+    if (gps_ != nullptr) {
+      d = gps_->get();
+      gps_ok = true;
+    }
+    _sample_battery_percent();
+
+    const std::string payload = build_ble_status_payload(
+        s, gps_ok, d, battery_percent_ok_, battery_percent_, charger_vbus_seen_, usb_c_adapter_present_,
+        tracking_session_id_, tracking_sleep_interval_s_);
+    ble_->notify_status(payload);
+  }
+
+  void _ble_status_notify_if_needed(void) {
+    if (ble_ == nullptr || !ble_->is_running()) {
+      last_ble_status_subscribed_ = false;
+      return;
+    }
+
+    const bool subscribed = ble_->status_subscribed();
+    if (subscribed && !last_ble_status_subscribed_) {
+      // Client subscribed: push the current status once.
+      ble_status_dirty_ = true;
+    }
+    last_ble_status_subscribed_ = subscribed;
+
+    if (!ble_status_dirty_ || !subscribed) {
+      return;
+    }
+
+    _ble_notify_status_now(_state);
+    ble_status_dirty_ = false;
+  }
 
   void _sample_battery_percent(void) {
     battery_percent_ok_ = false;
@@ -807,6 +855,13 @@ private:
     tracking_sleep_interval_s_ = s;
     RTC_TRACKING_SLEEP_INTERVAL_S = s;
     ESP_LOGI(GO_TAG, "config trackingSleepS=%" PRIu32, (uint32_t)s);
+    ble_status_dirty_ = true;
+
+#if NO_INACTIVE_NO_SLEEP == 1
+    if (_state == State::Tracking && _tracking_next_cycle_ms != 0) {
+      _tracking_next_cycle_ms = now_ms() + tracking_sleep_interval_s_ * 1000U;
+    }
+#endif
   }
 
   void _ble_notify(const NandStorageService::Record &rec, bool gps_ok, const GPSService::Data &gps) {
@@ -970,17 +1025,22 @@ private:
     }
 
     const State prev = _state;
-    if (ble_ != nullptr) {
-      if (next == State::Sync) {
-        ble_->stop();
-      } else if (prev == State::Sync) {
-        (void)ble_->start(ble_device_name_.c_str());
-      }
+
+    // State transition should emit a status update if a client is subscribed.
+    // Special-case SYNC: BLE is stopped to avoid Wi-Fi conflicts, so send the
+    // SYNC state before stopping.
+    if (ble_ != nullptr && next == State::Sync) {
+      _ble_notify_status_now(State::Sync);
+      ble_->stop();
+    } else if (ble_ != nullptr && prev == State::Sync) {
+      (void)ble_->start(ble_device_name_.c_str());
     }
 
     ESP_LOGI(GO_TAG, "state %s -> %s", state_name(_state), state_name(next));
     _state = next;
     _state_enter_ms = now_ms();
+
+    ble_status_dirty_ = true;
 
     if (_state == State::Idle) {
       _last_idle_measure_ms = 0;
@@ -993,10 +1053,14 @@ private:
     }
     if (_state == State::Tracking) {
       _tracking_started = false;
+      _tracking_next_cycle_ms = 0;
     }
     if (_state == State::Shutdown) {
       _shutdown_started = false;
     }
+
+    // Best-effort immediate notify if subscribed (except SYNC which stopped BLE).
+    _ble_status_notify_if_needed();
   }
 
   void _state_idle(const Inputs &in) {
@@ -1260,6 +1324,17 @@ private:
       _transition(State::Idle);
       return;
     }
+
+#if NO_INACTIVE_NO_SLEEP == 1
+    if (_tracking_next_cycle_ms != 0) {
+      const uint32_t now = now_ms();
+      // Handle wraparound safely via signed delta.
+      if ((int32_t)(now - _tracking_next_cycle_ms) < 0) {
+        return;
+      }
+      _tracking_next_cycle_ms = 0;
+    }
+#endif
 
     if (!_tracking_started) {
       _tracking_started = true;
@@ -2158,7 +2233,8 @@ private:
   void _tracking_enter_sleep(void) {
 
 #if NO_INACTIVE_NO_SLEEP == 1
-    vTaskDelay(pdMS_TO_TICKS(tracking_sleep_interval_s_ * 1000));
+    _tracking_next_cycle_ms = now_ms() + tracking_sleep_interval_s_ * 1000U;
+    _tracking_started = false;
     return;
 #endif // NO_INACTIVE_NO_SLEEP == 1
 
