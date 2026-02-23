@@ -19,6 +19,7 @@ set (
     esp_driver_usb_serial_jtag
     bq25629
     CO2Sensor
+    embedded-i2c-scd4x
 )
 
 set(srcs

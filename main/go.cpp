@@ -53,6 +53,13 @@
 
 #include "dps368.h"
 
+// embedded-i2c-scd4x (test-only)
+extern "C" {
+#include "scd4x_i2c.h"
+#include "sensirion_i2c_hal.h"
+#include "sensirion_i2c_hal_esp_idf.h"
+}
+
 // NOTE: Temporary constants
 #define NO_INACTIVE_NO_SLEEP 1
 #define TRACKING_DISPLAY_SLEEP 0
@@ -63,6 +70,10 @@ enum class State {
   Sync,
   Tracking,
   Shutdown,
+};
+
+struct Scd4xTest {
+  bool initialized = false;
 };
 
 RTC_DATA_ATTR static State RTC_LAST_STATE = State::Idle;
@@ -645,12 +656,13 @@ class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
                TVOCNOxSensor *tvoc_nox_sensor, CO2Sensor *co2_sensor, dps368_handle_t *dps368,
+               Scd4xTest *scd4x,
                BLEStream *ble,
                i2c_master_bus_handle_t i2c_bus, GPSService *gps, ui::DashboardUI *ui,
                ssd1680x::panels::GDEY0213B74 *epd, NandStorageService *storage,
                drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
       : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
-        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), ble_(ble),
+        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), scd4x_(scd4x), ble_(ble),
         i2c_bus_(i2c_bus), gps_(gps),
         ui_(ui), epd_(epd),
         storage_(storage), charger_(charger),
@@ -727,6 +739,7 @@ private:
   TVOCNOxSensor *tvoc_nox_sensor_ = nullptr;
   CO2Sensor *co2_sensor_ = nullptr;
   dps368_handle_t *dps368_ = nullptr;
+  Scd4xTest *scd4x_ = nullptr;
   BLEStream *ble_ = nullptr;
   i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
@@ -1436,6 +1449,23 @@ private:
       }
     }
 
+    if (scd4x_ != nullptr && scd4x_->initialized) {
+      bool ready = false;
+      const int16_t rdy_err = scd4x_get_data_ready_status(&ready);
+      if (rdy_err == 0 && ready) {
+        uint16_t co2_ppm = 0;
+        int32_t t_mdeg_c = 0;
+        int32_t rh_mpermil = 0;
+        const int16_t meas_err = scd4x_read_measurement(&co2_ppm, &t_mdeg_c, &rh_mpermil);
+        if (meas_err == 0 && co2_ppm != 0) {
+          ESP_LOGI(GO_TAG, "scd4x: co2=%u t=%.2fC rh=%.2f%%", (unsigned)co2_ppm,
+                   (double)t_mdeg_c / 1000.0, (double)rh_mpermil / 1000.0);
+        } else if (meas_err != 0) {
+          ESP_LOGW(GO_TAG, "scd4x read failed: %d", (int)meas_err);
+        }
+      }
+    }
+
     dps368_data_t dps = {};
     bool pressure_valid = false;
 
@@ -1908,6 +1938,23 @@ private:
       }
     }
 
+    if (scd4x_ != nullptr && scd4x_->initialized) {
+      bool ready = false;
+      const int16_t rdy_err = scd4x_get_data_ready_status(&ready);
+      if (rdy_err == 0 && ready) {
+        uint16_t scd_co2_ppm = 0;
+        int32_t scd_t_mdeg_c = 0;
+        int32_t scd_rh_mpermil = 0;
+        const int16_t meas_err = scd4x_read_measurement(&scd_co2_ppm, &scd_t_mdeg_c, &scd_rh_mpermil);
+        if (meas_err == 0 && scd_co2_ppm != 0) {
+          ESP_LOGI(GO_TAG, "scd4x: co2=%u t=%.2fC rh=%.2f%%", (unsigned)scd_co2_ppm,
+                   (double)scd_t_mdeg_c / 1000.0, (double)scd_rh_mpermil / 1000.0);
+        } else if (meas_err != 0) {
+          ESP_LOGW(GO_TAG, "scd4x read failed: %d", (int)meas_err);
+        }
+      }
+    }
+
     TVOCNOxData gas = {};
     bool tvoc_valid = false;
     bool nox_valid = false;
@@ -2161,6 +2208,32 @@ extern "C" void app_main(void) {
   i2c_master_bus_handle_t bus_handle = nullptr;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
 
+  static Scd4xTest scd4x;
+  Scd4xTest *scd4x_ptr = nullptr;
+  {
+    sensirion_i2c_hal_set_bus_handle(bus_handle);
+    sensirion_i2c_hal_init();
+
+    scd4x_init(SCD41_I2C_ADDR_62);
+
+    int16_t err = scd4x_wake_up();
+    if (err != 0) {
+      ESP_LOGW(GO_TAG, "SCD4x wake_up failed: %d", (int)err);
+    }
+
+    (void)scd4x_stop_periodic_measurement();
+    (void)scd4x_reinit();
+
+    err = scd4x_start_periodic_measurement();
+    if (err != 0) {
+      ESP_LOGW(GO_TAG, "SCD4x start_periodic_measurement failed: %d", (int)err);
+    } else {
+      scd4x.initialized = true;
+      scd4x_ptr = &scd4x;
+      ESP_LOGI(GO_TAG, "SCD4x initialized (test-only)");
+    }
+  }
+
   dps368_handle_t *dps368_ptr = nullptr;
   {
     const esp_err_t err = dps368_init(bus_handle, DPS368_I2C_ADDR_SDO_VDD, &dps368_ptr);
@@ -2315,8 +2388,8 @@ extern "C" void app_main(void) {
 
   static BLEStream ble;
   GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, co2_sensor_ptr,
-                  dps368_ptr, &ble, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr, charger_ptr,
-                  wdt_last_reset_ms, bq_wdt_last_reset_ms);
+                  dps368_ptr, scd4x_ptr, &ble, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr,
+                  charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 
