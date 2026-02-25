@@ -90,3 +90,39 @@ TempHumData STCC4Sensor::temp_hum_data() {
   }
   return last_temp_hum_;
 }
+
+bool STCC4Sensor::force_calibration(uint16_t target_ppm) {
+  if (!dev_.initialized) {
+    ESP_LOGW(TAG, "force_calibration: sensor not initialized");
+    return false;
+  }
+
+  if (target_ppm == 0) {
+    target_ppm = 400;
+  }
+
+  // Follow the recommended sequence from the STCC4 library header:
+  // stop continuous -> FRC -> start continuous.
+  esp_err_t err = stcc4_stop_continuous_measurement(&dev_);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "force_calibration: stop continuous failed: %s", esp_err_to_name(err));
+    // Continue anyway; FRC may still succeed.
+  }
+
+  int16_t correction = 0;
+  err = stcc4_perform_forced_recalibration(&dev_, target_ppm, &correction);
+  const bool ok = (err == ESP_OK);
+  if (ok) {
+    ESP_LOGI(TAG, "force_calibration: target=%u ppm correction=%d ppm", (unsigned)target_ppm,
+             (int)correction);
+  } else {
+    ESP_LOGW(TAG, "force_calibration failed: %s", esp_err_to_name(err));
+  }
+
+  esp_err_t restart = stcc4_start_continuous_measurement(&dev_);
+  if (restart != ESP_OK) {
+    ESP_LOGW(TAG, "force_calibration: restart continuous failed: %s", esp_err_to_name(restart));
+  }
+
+  return ok;
+}

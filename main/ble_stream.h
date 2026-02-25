@@ -40,6 +40,7 @@ class BLEStream {
   void notify_measures(const std::string& json);
   void notify_status(const std::string& json);
   bool take_pending_tracking_sleep_interval_s(uint32_t* out);
+  bool take_pending_co2_force_calib(uint16_t* out_ppm);
 
  private:
   friend class BLEStreamCharCallbacks;
@@ -49,6 +50,7 @@ class BLEStream {
   void set_status_subscribed_(bool v);
 
   void request_tracking_sleep_interval_s_(uint32_t s);
+  void request_co2_force_calib_(uint16_t ppm);
 
   std::atomic<bool> running_{false};
   std::atomic<bool> measures_subscribed_{false};
@@ -56,6 +58,9 @@ class BLEStream {
 
   std::atomic<bool> pending_tracking_sleep_interval_{false};
   std::atomic<uint32_t> pending_tracking_sleep_interval_s_{0};
+
+  std::atomic<bool> pending_co2_force_calib_{false};
+  std::atomic<uint16_t> pending_co2_force_calib_ppm_{0};
 
   NimBLEServer* server_ = nullptr;
   NimBLEService* service_ = nullptr;

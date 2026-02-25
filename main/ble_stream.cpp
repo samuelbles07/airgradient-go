@@ -99,6 +99,16 @@ class BLEStreamConfigCallbacks : public NimBLECharacteristicCallbacks {
             ESP_LOGI(TAG, "config trackingSleepS=%" PRIu32, nv);
           }
         }
+
+        const cJSON* c = cJSON_GetObjectItemCaseSensitive(root, "co2ForceCalib");
+        if (cJSON_IsNumber(c)) {
+          const double dv = c->valuedouble;
+          const uint32_t nv = (uint32_t)llround(dv);
+          if ((double)nv == dv && nv >= 1 && nv <= 32000) {
+            s_->request_co2_force_calib_((uint16_t)nv);
+            ESP_LOGI(TAG, "config co2ForceCalib=%" PRIu32, nv);
+          }
+        }
       }
       cJSON_Delete(root);
     }
@@ -245,6 +255,11 @@ void BLEStream::request_tracking_sleep_interval_s_(uint32_t s) {
   pending_tracking_sleep_interval_.store(true, std::memory_order_relaxed);
 }
 
+void BLEStream::request_co2_force_calib_(uint16_t ppm) {
+  pending_co2_force_calib_ppm_.store(ppm, std::memory_order_relaxed);
+  pending_co2_force_calib_.store(true, std::memory_order_relaxed);
+}
+
 
 bool BLEStream::take_pending_tracking_sleep_interval_s(uint32_t* out) {
   if (out == nullptr) {
@@ -255,6 +270,18 @@ bool BLEStream::take_pending_tracking_sleep_interval_s(uint32_t* out) {
     return false;
   }
   *out = pending_tracking_sleep_interval_s_.load(std::memory_order_relaxed);
+  return true;
+}
+
+bool BLEStream::take_pending_co2_force_calib(uint16_t* out_ppm) {
+  if (out_ppm == nullptr) {
+    return false;
+  }
+  const bool had = pending_co2_force_calib_.exchange(false, std::memory_order_relaxed);
+  if (!had) {
+    return false;
+  }
+  *out_ppm = pending_co2_force_calib_ppm_.load(std::memory_order_relaxed);
   return true;
 }
 

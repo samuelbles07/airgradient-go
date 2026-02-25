@@ -202,7 +202,8 @@ static std::string build_ble_status_payload(State s,
                                             bool have_charging,
                                             bool charging,
                                             uint32_t route_id,
-                                            uint32_t tracking_sleep_s) {
+                                            uint32_t tracking_sleep_s,
+                                            bool co2_calibrating) {
   cJSON *root = cJSON_CreateObject();
   if (root == nullptr) {
     return {};
@@ -210,6 +211,9 @@ static std::string build_ble_status_payload(State s,
 
   cJSON_AddStringToObject(root, "state", state_name(s));
   cJSON_AddNumberToObject(root, "trackingSleepS", (double)tracking_sleep_s);
+  if (co2_calibrating) {
+    cJSON_AddBoolToObject(root, "co2Calibrating", true);
+  }
   if (s == State::Tracking) {
     cJSON_AddNumberToObject(root, "route", (double)route_id);
   }
@@ -728,6 +732,7 @@ public:
     _init();
     while (true) {
       _apply_ble_config_if_needed();
+      _co2_force_calibrate_if_needed();
       _kick_watchdogs_if_needed();
       _poll_usb_c_if_needed();
       Inputs inputs = _poll_inputs();
@@ -780,6 +785,11 @@ private:
   bool scd4x_last_valid_ = false;
   uint16_t scd4x_last_ppm_ = 0;
 
+  bool pending_co2_force_calib_ = false;
+  uint16_t pending_co2_force_calib_ppm_ = 400;
+
+  bool co2_calibrating_ = false;
+
   bool ble_status_dirty_ = true;
   bool last_ble_status_subscribed_ = false;
 
@@ -801,7 +811,7 @@ private:
 
     const std::string payload = build_ble_status_payload(
         s, gps_ok, d, battery_percent_ok_, battery_percent_, charger_vbus_seen_, usb_c_adapter_present_,
-        tracking_session_id_, tracking_sleep_interval_s_);
+        tracking_session_id_, tracking_sleep_interval_s_, co2_calibrating_);
     ble_->notify_status(payload);
   }
 
@@ -845,23 +855,73 @@ private:
     if (ble_ == nullptr) {
       return;
     }
+
     uint32_t s = 0;
-    if (!ble_->take_pending_tracking_sleep_interval_s(&s)) {
-      return;
-    }
-    if (s == 0) {
-      return;
-    }
-    tracking_sleep_interval_s_ = s;
-    RTC_TRACKING_SLEEP_INTERVAL_S = s;
-    ESP_LOGI(GO_TAG, "config trackingSleepS=%" PRIu32, (uint32_t)s);
-    ble_status_dirty_ = true;
+    if (ble_->take_pending_tracking_sleep_interval_s(&s)) {
+      if (s != 0) {
+        tracking_sleep_interval_s_ = s;
+        RTC_TRACKING_SLEEP_INTERVAL_S = s;
+        ESP_LOGI(GO_TAG, "config trackingSleepS=%" PRIu32, (uint32_t)s);
+        ble_status_dirty_ = true;
 
 #if NO_INACTIVE_NO_SLEEP == 1
-    if (_state == State::Tracking && _tracking_next_cycle_ms != 0) {
-      _tracking_next_cycle_ms = now_ms() + tracking_sleep_interval_s_ * 1000U;
-    }
+        if (_state == State::Tracking && _tracking_next_cycle_ms != 0) {
+          _tracking_next_cycle_ms = now_ms() + tracking_sleep_interval_s_ * 1000U;
+        }
 #endif
+      }
+    }
+
+    uint16_t ppm = 0;
+    if (ble_->take_pending_co2_force_calib(&ppm)) {
+      if (ppm == 0) {
+        ppm = 400;
+      }
+      pending_co2_force_calib_ppm_ = ppm;
+      pending_co2_force_calib_ = true;
+      co2_calibrating_ = true;
+      ble_status_dirty_ = true;
+
+      // Ensure the client sees co2Calibrating=true before we potentially block
+      // in the calibration routine.
+      if (ble_->is_running() && ble_->status_subscribed()) {
+        _ble_notify_status_now(_state);
+        ble_status_dirty_ = false;
+      }
+    }
+  }
+
+  void _co2_force_calibrate_if_needed(void) {
+    if (!pending_co2_force_calib_) {
+      return;
+    }
+    if (_state != State::Idle) {
+      return;
+    }
+    if (co2_sensor_ == nullptr || !co2_sensor_->support_force_calibration()) {
+      ESP_LOGW(GO_TAG, "co2ForceCalib requested but sensor doesn't support it");
+      pending_co2_force_calib_ = false;
+      co2_calibrating_ = false;
+      ble_status_dirty_ = true;
+      if (ble_ != nullptr && ble_->is_running() && ble_->status_subscribed()) {
+        _ble_notify_status_now(_state);
+        ble_status_dirty_ = false;
+      }
+      return;
+    }
+
+    const uint16_t ppm = pending_co2_force_calib_ppm_;
+    pending_co2_force_calib_ = false;
+    ESP_LOGI(GO_TAG, "co2ForceCalib begin target=%u ppm", (unsigned)ppm);
+    const bool ok = co2_sensor_->force_calibration(ppm);
+    ESP_LOGI(GO_TAG, "co2ForceCalib %s", ok ? "ok" : "failed");
+
+    co2_calibrating_ = false;
+    ble_status_dirty_ = true;
+    if (ble_ != nullptr && ble_->is_running() && ble_->status_subscribed()) {
+      _ble_notify_status_now(_state);
+      ble_status_dirty_ = false;
+    }
   }
 
   void _ble_notify(const NandStorageService::Record &rec, bool gps_ok, const GPSService::Data &gps) {
@@ -879,7 +939,7 @@ private:
     if (ble_->status_subscribed()) {
       const std::string payload = build_ble_status_payload(
           _state, gps_ok, gps, battery_percent_ok_, battery_percent_, charger_vbus_seen_,
-          usb_c_adapter_present_, rec.id, tracking_sleep_interval_s_);
+          usb_c_adapter_present_, rec.id, tracking_sleep_interval_s_, co2_calibrating_);
       ble_->notify_status(payload);
     }
   }

@@ -29,6 +29,9 @@ public:
   bool support_temp_hum() const override { return true; }
   TempHumData temp_hum_data() override;
 
+  bool support_force_calibration() const override { return true; }
+  bool force_calibration(uint16_t target_ppm = 400) override;
+
 private:
   const char *const TAG = "STCC4Sensor";
 
