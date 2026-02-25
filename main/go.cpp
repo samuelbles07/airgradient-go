@@ -898,29 +898,62 @@ private:
     if (_state != State::Idle) {
       return;
     }
-    if (co2_sensor_ == nullptr || !co2_sensor_->support_force_calibration()) {
-      ESP_LOGW(GO_TAG, "co2ForceCalib requested but sensor doesn't support it");
-      pending_co2_force_calib_ = false;
-      co2_calibrating_ = false;
-      ble_status_dirty_ = true;
-      if (ble_ != nullptr && ble_->is_running() && ble_->status_subscribed()) {
-        _ble_notify_status_now(_state);
-        ble_status_dirty_ = false;
-      }
-      return;
-    }
-
     const uint16_t ppm = pending_co2_force_calib_ppm_;
     pending_co2_force_calib_ = false;
-    ESP_LOGI(GO_TAG, "co2ForceCalib begin target=%u ppm", (unsigned)ppm);
-    const bool ok = co2_sensor_->force_calibration(ppm);
-    ESP_LOGI(GO_TAG, "co2ForceCalib %s", ok ? "ok" : "failed");
+
+    // Run STCC4 calibration first (if supported).
+    if (co2_sensor_ != nullptr && co2_sensor_->support_force_calibration()) {
+      ESP_LOGI(GO_TAG, "co2ForceCalib (stcc4) begin target=%u ppm", (unsigned)ppm);
+      const bool ok = co2_sensor_->force_calibration(ppm);
+      ESP_LOGI(GO_TAG, "co2ForceCalib (stcc4) %s", ok ? "ok" : "failed");
+    } else {
+      ESP_LOGW(GO_TAG, "co2ForceCalib: CO2 sensor doesn't support calibration");
+    }
+
+    // Then run SCD4x (SCD43) calibration (test-only integration).
+    if (scd4x_ != nullptr && scd4x_->initialized) {
+      _scd4x_force_calibration_(ppm);
+    }
 
     co2_calibrating_ = false;
     ble_status_dirty_ = true;
     if (ble_ != nullptr && ble_->is_running() && ble_->status_subscribed()) {
       _ble_notify_status_now(_state);
       ble_status_dirty_ = false;
+    }
+  }
+
+  void _scd4x_force_calibration_(uint16_t target_ppm) {
+    if (target_ppm == 0) {
+      target_ppm = 400;
+    }
+
+    ESP_LOGI(GO_TAG, "co2ForceCalib (scd4x) begin target=%u ppm", (unsigned)target_ppm);
+
+    // SCD4x FRC is only available in idle mode; stop periodic first.
+    int16_t err = scd4x_stop_periodic_measurement();
+    if (err != 0) {
+      ESP_LOGW(GO_TAG, "co2ForceCalib (scd4x) stop_periodic failed: %d", (int)err);
+      // Continue anyway; some firmwares tolerate FRC after a failed stop.
+    }
+
+    uint16_t corr_raw = 0;
+    err = scd4x_perform_forced_recalibration(target_ppm, &corr_raw);
+    if (err != 0) {
+      ESP_LOGW(GO_TAG, "co2ForceCalib (scd4x) FRC failed: %d", (int)err);
+    } else {
+      // Library docs: correction in ppm = corr_raw - 0x8000. 0xFFFF indicates failure.
+      if (corr_raw == 0xFFFFu) {
+        ESP_LOGW(GO_TAG, "co2ForceCalib (scd4x) FRC failed (0xFFFF)");
+      } else {
+        const int32_t corr_ppm = (int32_t)corr_raw - 0x8000;
+        ESP_LOGI(GO_TAG, "co2ForceCalib (scd4x) correction=%" PRId32 " ppm", corr_ppm);
+      }
+    }
+
+    err = scd4x_start_periodic_measurement();
+    if (err != 0) {
+      ESP_LOGW(GO_TAG, "co2ForceCalib (scd4x) start_periodic failed: %d", (int)err);
     }
   }
 
