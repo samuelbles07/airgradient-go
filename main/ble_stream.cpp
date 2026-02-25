@@ -21,6 +21,7 @@ static constexpr const char* SERVICE_UUID = "d1c0c0a0-6b48-4b2a-9b1d-59f9f2b0a1e
 static constexpr const char* MEASURES_CHAR_UUID = "d1c0c0a1-6b48-4b2a-9b1d-59f9f2b0a1e1";
 static constexpr const char* STATUS_CHAR_UUID = "d1c0c0a2-6b48-4b2a-9b1d-59f9f2b0a1e1";
 static constexpr const char* CONFIG_CHAR_UUID = "d1c0c0a3-6b48-4b2a-9b1d-59f9f2b0a1e1";
+static constexpr const char* HISTORY_CHAR_UUID = "d1c0c0a4-6b48-4b2a-9b1d-59f9f2b0a1e1";
 
 static constexpr uint32_t TRACKING_SLEEP_MIN_S = 1;
 static constexpr uint32_t TRACKING_SLEEP_MAX_S = 86400;
@@ -67,9 +68,52 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
     }
     s_->set_measures_subscribed_(false);
     s_->set_status_subscribed_(false);
+    s_->set_history_subscribed_(false);
 
     // Belt-and-suspenders: ensure advertising restarts.
     (void)NimBLEDevice::startAdvertising();
+  }
+
+ private:
+  BLEStream* s_ = nullptr;
+};
+
+class BLEStreamHistoryCallbacks : public NimBLECharacteristicCallbacks {
+ public:
+  explicit BLEStreamHistoryCallbacks(BLEStream* s) : s_(s) {}
+
+  void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo,
+                   uint16_t subValue) override {
+    (void)pCharacteristic;
+    (void)connInfo;
+
+    const bool notify_enabled = (subValue & 0x0001) != 0;
+    if (s_ == nullptr) {
+      return;
+    }
+    s_->set_history_subscribed_(notify_enabled);
+    ESP_LOGI(TAG, "history subscribe=%d", (int)notify_enabled);
+  }
+
+  void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
+    (void)connInfo;
+    if (s_ == nullptr || pCharacteristic == nullptr) {
+      return;
+    }
+
+    const NimBLEAttValue v = pCharacteristic->getValue();
+    if (v.size() == 0) {
+      return;
+    }
+
+    // Accept either byte 0x01 or ASCII "1".
+    if (v.size() == 1) {
+      const uint8_t b = (uint8_t)v.data()[0];
+      if (b == 0x01 || b == (uint8_t)'1') {
+        s_->request_history_start_();
+        ESP_LOGI(TAG, "history start requested");
+      }
+    }
   }
 
  private:
@@ -132,6 +176,10 @@ void BLEStream::set_status_subscribed_(bool v) {
   status_subscribed_.store(v);
 }
 
+void BLEStream::set_history_subscribed_(bool v) {
+  history_subscribed_.store(v);
+}
+
 esp_err_t BLEStream::start(const char* device_name) {
   if (running_.load()) {
     return ESP_OK;
@@ -142,6 +190,9 @@ esp_err_t BLEStream::start(const char* device_name) {
 
   measures_subscribed_.store(false);
   status_subscribed_.store(false);
+  history_subscribed_.store(false);
+
+  pending_history_start_.store(false);
 
   if (!NimBLEDevice::init(std::string(device_name))) {
     ESP_LOGW(TAG, "NimBLEDevice::init failed");
@@ -176,7 +227,11 @@ esp_err_t BLEStream::start(const char* device_name) {
   status_char_ = service_->createCharacteristic(STATUS_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
   config_char_ = service_->createCharacteristic(
       CONFIG_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR, 128);
-  if (measures_char_ == nullptr || status_char_ == nullptr || config_char_ == nullptr) {
+  history_char_ = service_->createCharacteristic(
+      HISTORY_CHAR_UUID,
+      NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR,
+      512);
+  if (measures_char_ == nullptr || status_char_ == nullptr || config_char_ == nullptr || history_char_ == nullptr) {
     ESP_LOGW(TAG, "createCharacteristic failed");
     (void)NimBLEDevice::deinit(true);
     server_ = nullptr;
@@ -184,6 +239,7 @@ esp_err_t BLEStream::start(const char* device_name) {
     measures_char_ = nullptr;
     status_char_ = nullptr;
     config_char_ = nullptr;
+    history_char_ = nullptr;
     return ESP_FAIL;
   }
 
@@ -195,6 +251,11 @@ esp_err_t BLEStream::start(const char* device_name) {
   }
   measures_char_->setCallbacks(measures_cb_);
   status_char_->setCallbacks(status_cb_);
+
+  if (history_cb_ == nullptr) {
+    history_cb_ = new BLEStreamHistoryCallbacks(this);
+  }
+  history_char_->setCallbacks(history_cb_);
 
   if (config_cb_ == nullptr) {
     config_cb_ = new BLEStreamConfigCallbacks(this);
@@ -229,6 +290,9 @@ void BLEStream::stop() {
 
   measures_subscribed_.store(false);
   status_subscribed_.store(false);
+  history_subscribed_.store(false);
+
+  pending_history_start_.store(false);
 
   // Stop advertising and disconnect peers best-effort.
   (void)NimBLEDevice::stopAdvertising();
@@ -246,6 +310,7 @@ void BLEStream::stop() {
   measures_char_ = nullptr;
   status_char_ = nullptr;
   config_char_ = nullptr;
+  history_char_ = nullptr;
   running_.store(false);
   ESP_LOGI(TAG, "stopped");
 }
@@ -258,6 +323,10 @@ void BLEStream::request_tracking_sleep_interval_s_(uint32_t s) {
 void BLEStream::request_co2_force_calib_(uint16_t ppm) {
   pending_co2_force_calib_ppm_.store(ppm, std::memory_order_relaxed);
   pending_co2_force_calib_.store(true, std::memory_order_relaxed);
+}
+
+void BLEStream::request_history_start_() {
+  pending_history_start_.store(true, std::memory_order_relaxed);
 }
 
 
@@ -285,6 +354,10 @@ bool BLEStream::take_pending_co2_force_calib(uint16_t* out_ppm) {
   return true;
 }
 
+bool BLEStream::take_pending_history_start() {
+  return pending_history_start_.exchange(false, std::memory_order_relaxed);
+}
+
 void BLEStream::notify_measures(const std::string& json) {
   if (!running_.load() || !measures_subscribed_.load() || measures_char_ == nullptr) {
     return;
@@ -309,4 +382,18 @@ void BLEStream::notify_status(const std::string& json) {
   if (!ok) {
     ESP_LOGW(TAG, "status notify failed (len=%u)", (unsigned)json.size());
   }
+}
+
+bool BLEStream::notify_history(const std::string& json) {
+  if (!running_.load() || !history_subscribed_.load() || history_char_ == nullptr) {
+    return false;
+  }
+  if (json.empty()) {
+    return false;
+  }
+  const bool ok = history_char_->notify((const uint8_t*)json.data(), json.size());
+  if (!ok) {
+    ESP_LOGW(TAG, "history notify failed (len=%u)", (unsigned)json.size());
+  }
+  return ok;
 }

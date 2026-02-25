@@ -194,6 +194,62 @@ static std::string build_ble_measure_payload(const NandStorageService::Record &r
   return out;
 }
 
+static std::string build_ble_history_payload(const NandStorageService::Record &r, bool last) {
+  cJSON *m = cJSON_CreateObject();
+  if (m == nullptr) {
+    return {};
+  }
+
+  // Always include date; null if not available.
+  if (r.timestamp_ms != 0) {
+    char date[32];
+    format_rfc3339_utc(r.timestamp_ms, date, sizeof(date));
+    cJSON_AddStringToObject(m, "date", date);
+  } else {
+    cJSON_AddNullToObject(m, "date");
+  }
+
+  if (r.latitude_e7 != INT32_MIN && r.longitude_e7 != INT32_MIN) {
+    cJSON_AddNumberToObject(m, "lat", (double)r.latitude_e7 / 10000000.0);
+    cJSON_AddNumberToObject(m, "lng", (double)r.longitude_e7 / 10000000.0);
+  }
+
+  // PM mass (atmospheric)
+  go_utils::json_add_u16_x10_if_valid(m, "pm01", r.pm01_ugm3_x10);
+  go_utils::json_add_u16_x10_if_valid(m, "pm02", r.pm25_ugm3_x10);
+  go_utils::json_add_u16_x10_if_valid(m, "pm10", r.pm10_ugm3_x10);
+
+  // PM counts / bins
+  go_utils::json_add_u32_x10_if_valid(m, "pm005Count", r.pc05_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pm01Count", r.pc10_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pm02Count", r.pc25_x10);
+  go_utils::json_add_u32_x10_if_valid(m, "pm10Count", r.pc100_x10);
+
+  go_utils::json_add_u16_if_valid(m, "rco2", r.co2_ppm);
+  go_utils::json_add_u16_if_valid(m, "scd4x", r.scd4x);
+  go_utils::json_add_i16_x100_if_valid(m, "atmp", r.temperature_c_x100);
+  go_utils::json_add_u16_x100_if_valid(m, "rhum", r.humidity_rh_x100);
+
+  if (r.pressure_pa != 0xFFFFFFFFu) {
+    cJSON_AddNumberToObject(m, "pres", (double)r.pressure_pa / 100.0);
+  }
+
+  go_utils::json_add_u16_if_valid(m, "tvocRaw", r.tvoc_raw);
+  go_utils::json_add_u16_if_valid(m, "noxRaw", r.nox_raw);
+
+  cJSON_AddNumberToObject(m, "route", (double)r.id);
+  cJSON_AddBoolToObject(m, "last", last);
+
+  char *json = cJSON_PrintUnformatted(m);
+  std::string out;
+  if (json != nullptr) {
+    out.assign(json);
+    cJSON_free(json);
+  }
+  cJSON_Delete(m);
+  return out;
+}
+
 static std::string build_ble_status_payload(State s,
                                             bool gps_ok,
                                             const GPSService::Data &gps,
@@ -731,6 +787,13 @@ public:
   void Run(void) {
     _init();
     while (true) {
+      if (ble_ != nullptr && ble_->take_pending_history_start()) {
+        if (_state == State::Idle) {
+          _ble_history_export_run_blocking_();
+        }
+        // Requirement: ignore if not in IDLE.
+      }
+
       _apply_ble_config_if_needed();
       _co2_force_calibrate_if_needed();
       _kick_watchdogs_if_needed();
@@ -789,6 +852,7 @@ private:
   uint16_t pending_co2_force_calib_ppm_ = 400;
 
   bool co2_calibrating_ = false;
+
 
   bool ble_status_dirty_ = true;
   bool last_ble_status_subscribed_ = false;
@@ -920,6 +984,114 @@ private:
     if (ble_ != nullptr && ble_->is_running() && ble_->status_subscribed()) {
       _ble_notify_status_now(_state);
       ble_status_dirty_ = false;
+    }
+  }
+
+  void _ble_history_export_run_blocking_(void) {
+    if (ble_ == nullptr) {
+      return;
+    }
+    if (_state != State::Idle) {
+      return;
+    }
+    if (storage_ == nullptr || !storage_->is_ready()) {
+      ESP_LOGW(GO_TAG, "history export ignored: storage not ready");
+      return;
+    }
+    if (!ble_->is_running() || !ble_->history_subscribed()) {
+      ESP_LOGW(GO_TAG, "history export ignored: BLE history not subscribed");
+      return;
+    }
+
+    const TickType_t to = pdMS_TO_TICKS(GO_NAND_CMD_TIMEOUT_MS);
+    uint32_t total = 0;
+    esp_err_t err = storage_->get_count_sync(&total, to);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "history export start failed: %s", esp_err_to_name(err));
+      return;
+    }
+
+    ESP_LOGI(GO_TAG, "history export begin: total=%" PRIu32, total);
+
+    if (total == 0) {
+      // Emit a single terminal packet.
+      cJSON *m = cJSON_CreateObject();
+      if (m != nullptr) {
+        cJSON_AddNullToObject(m, "date");
+        cJSON_AddBoolToObject(m, "last", true);
+        char *json = cJSON_PrintUnformatted(m);
+        if (json != nullptr) {
+          (void)ble_->notify_history(std::string(json));
+          cJSON_free(json);
+        }
+        cJSON_Delete(m);
+      }
+      ESP_LOGI(GO_TAG, "history export done (empty)");
+      return;
+    }
+
+    static constexpr uint32_t CHUNK = 3;
+    NandStorageService::Record recs[CHUNK];
+
+    uint32_t idx = 0;
+    while (idx < total) {
+      // Requirement: block everything, but keep watchdogs alive.
+      _kick_watchdogs_if_needed();
+
+      if (_state != State::Idle) {
+        ESP_LOGW(GO_TAG, "history export aborted: left IDLE");
+        return;
+      }
+      if (!ble_->is_running() || !ble_->history_subscribed()) {
+        ESP_LOGW(GO_TAG, "history export aborted: BLE history not subscribed");
+        return;
+      }
+      if (storage_ == nullptr || !storage_->is_ready()) {
+        ESP_LOGW(GO_TAG, "history export aborted: storage not ready");
+        return;
+      }
+
+      uint32_t nread = 0;
+      err = storage_->read_range_sync(idx, recs, CHUNK, &nread, to);
+      if (err != ESP_OK || nread == 0) {
+        ESP_LOGW(GO_TAG, "history export read failed at idx=%" PRIu32 ": %s", idx,
+                 esp_err_to_name(err));
+        return;
+      }
+
+      for (uint32_t i = 0; i < nread; ++i) {
+        const bool last = ((idx + 1U) >= total);
+        const std::string payload = build_ble_history_payload(recs[i], last);
+
+        while (true) {
+          if (_state != State::Idle) {
+            ESP_LOGW(GO_TAG, "history export aborted: left IDLE");
+            return;
+          }
+          if (!ble_->is_running() || !ble_->history_subscribed()) {
+            ESP_LOGW(GO_TAG, "history export aborted: BLE history not subscribed");
+            return;
+          }
+          _kick_watchdogs_if_needed();
+
+          if (ble_->notify_history(payload)) {
+            break;
+          }
+
+          // Give NimBLE + IDLE task time; required to avoid task_wdt.
+          vTaskDelay(1);
+        }
+
+        idx += 1;
+
+        // Yield between records.
+        vTaskDelay(1);
+
+        if (last) {
+          ESP_LOGI(GO_TAG, "history export done");
+          return;
+        }
+      }
     }
   }
 
