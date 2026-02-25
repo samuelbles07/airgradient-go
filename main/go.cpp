@@ -145,108 +145,177 @@ static void format_rfc3339_utc(uint64_t epoch_ms, char *out, size_t out_len);
 static const char *state_name(State s);
 
 static std::string build_ble_measure_payload(const NandStorageService::Record &r) {
-  cJSON *m = cJSON_CreateObject();
-  if (m == nullptr) {
-    return {};
-  }
+  auto trim_float_str = [](char *buf) {
+    if (buf == nullptr) {
+      return;
+    }
+    size_t n = strlen(buf);
+    while (n > 0 && buf[n - 1] == '0') {
+      buf[n - 1] = '\0';
+      n--;
+    }
+    if (n > 0 && buf[n - 1] == '.') {
+      buf[n - 1] = '\0';
+    }
+  };
+
+  auto append_field = [](std::string &out, const char *s) {
+    if (s != nullptr) {
+      out.append(s);
+    }
+    out.push_back(';');
+  };
+
+  auto append_empty = [&](std::string &out) { append_field(out, nullptr); };
+
+  auto append_u64 = [&](std::string &out, uint64_t v) {
+    char buf[24];
+    (void)snprintf(buf, sizeof(buf), "%" PRIu64, v);
+    append_field(out, buf);
+  };
+  auto append_u32 = [&](std::string &out, uint32_t v) {
+    char buf[16];
+    (void)snprintf(buf, sizeof(buf), "%" PRIu32, v);
+    append_field(out, buf);
+  };
+  auto append_u16 = [&](std::string &out, uint16_t v) {
+    char buf[8];
+    (void)snprintf(buf, sizeof(buf), "%u", (unsigned)v);
+    append_field(out, buf);
+  };
+  auto append_i16 = [&](std::string &out, int16_t v) {
+    char buf[8];
+    (void)snprintf(buf, sizeof(buf), "%d", (int)v);
+    append_field(out, buf);
+  };
+
+  // Measures payload: positional semicolon-separated fields (fixed order).
+  // Invalid values are emitted as empty fields, except timestamp which is "null" when missing.
+  // Format:
+  // ts_ms;lat;lng;pm01_x10;pm25_x10;pm10_x10;pc05_x10;pc10_x10;pc25_x10;pc100_x10;
+  // rco2_ppm;scd4x_ppm;atmp_c_x100;rhum_x100;pres_pa;tvoc_raw;nox_raw;
+  std::string out;
+  out.reserve(192);
 
   if (r.timestamp_ms != 0) {
-    char date[32];
-    format_rfc3339_utc(r.timestamp_ms, date, sizeof(date));
-    cJSON_AddStringToObject(m, "date", date);
+    append_u64(out, r.timestamp_ms);
+  } else {
+    append_empty(out);
   }
 
-  if (r.latitude_e7 != INT32_MIN && r.longitude_e7 != INT32_MIN) {
-    cJSON_AddNumberToObject(m, "lat", (double)r.latitude_e7 / 10000000.0);
-    cJSON_AddNumberToObject(m, "lng", (double)r.longitude_e7 / 10000000.0);
+  if (r.latitude_e7 != INT32_MIN) {
+    char buf[24];
+    (void)snprintf(buf, sizeof(buf), "%.7f", (double)r.latitude_e7 / 10000000.0);
+    trim_float_str(buf);
+    append_field(out, buf);
+  } else {
+    append_empty(out);
   }
 
-  // PM mass (atmospheric)
-  go_utils::json_add_u16_x10_if_valid(m, "pm01", r.pm01_ugm3_x10);
-  go_utils::json_add_u16_x10_if_valid(m, "pm02", r.pm25_ugm3_x10);
-  go_utils::json_add_u16_x10_if_valid(m, "pm10", r.pm10_ugm3_x10);
+  if (r.longitude_e7 != INT32_MIN) {
+    char buf[24];
+    (void)snprintf(buf, sizeof(buf), "%.7f", (double)r.longitude_e7 / 10000000.0);
+    trim_float_str(buf);
+    append_field(out, buf);
+  } else {
+    append_empty(out);
+  }
 
-  // PM counts / bins
-  go_utils::json_add_u32_x10_if_valid(m, "pm005Count", r.pc05_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pm01Count", r.pc10_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pm02Count", r.pc25_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pm10Count", r.pc100_x10);
+  if (r.pm01_ugm3_x10 != 0xFFFF) {
+    append_u16(out, r.pm01_ugm3_x10);
+  } else {
+    append_empty(out);
+  }
+  if (r.pm25_ugm3_x10 != 0xFFFF) {
+    append_u16(out, r.pm25_ugm3_x10);
+  } else {
+    append_empty(out);
+  }
+  if (r.pm10_ugm3_x10 != 0xFFFF) {
+    append_u16(out, r.pm10_ugm3_x10);
+  } else {
+    append_empty(out);
+  }
 
-  go_utils::json_add_u16_if_valid(m, "rco2", r.co2_ppm);
-  go_utils::json_add_u16_if_valid(m, "scd4x", r.scd4x);
-  go_utils::json_add_i16_x100_if_valid(m, "atmp", r.temperature_c_x100);
-  go_utils::json_add_u16_x100_if_valid(m, "rhum", r.humidity_rh_x100);
+  if (r.pc05_x10 != 0xFFFFFFFFu) {
+    append_u32(out, r.pc05_x10);
+  } else {
+    append_empty(out);
+  }
+  if (r.pc10_x10 != 0xFFFFFFFFu) {
+    append_u32(out, r.pc10_x10);
+  } else {
+    append_empty(out);
+  }
+  if (r.pc25_x10 != 0xFFFFFFFFu) {
+    append_u32(out, r.pc25_x10);
+  } else {
+    append_empty(out);
+  }
+  if (r.pc100_x10 != 0xFFFFFFFFu) {
+    append_u32(out, r.pc100_x10);
+  } else {
+    append_empty(out);
+  }
+
+  if (r.co2_ppm != 0xFFFF) {
+    append_u16(out, r.co2_ppm);
+  } else {
+    append_empty(out);
+  }
+  if (r.scd4x != 0xFFFF) {
+    append_u16(out, r.scd4x);
+  } else {
+    append_empty(out);
+  }
+
+  if (r.temperature_c_x100 != (int16_t)INT16_MIN) {
+    append_i16(out, r.temperature_c_x100);
+  } else {
+    append_empty(out);
+  }
+  if (r.humidity_rh_x100 != 0xFFFF) {
+    append_u16(out, r.humidity_rh_x100);
+  } else {
+    append_empty(out);
+  }
 
   if (r.pressure_pa != 0xFFFFFFFFu) {
-    cJSON_AddNumberToObject(m, "pres", (double)r.pressure_pa / 100.0);
+    append_u32(out, r.pressure_pa);
+  } else {
+    append_empty(out);
   }
 
-  go_utils::json_add_u16_if_valid(m, "tvocRaw", r.tvoc_raw);
-  go_utils::json_add_u16_if_valid(m, "noxRaw", r.nox_raw);
-
-  char *json = cJSON_PrintUnformatted(m);
-  std::string out;
-  if (json != nullptr) {
-    out.assign(json);
-    cJSON_free(json);
+  if (r.tvoc_raw != 0xFFFF) {
+    append_u16(out, r.tvoc_raw);
+  } else {
+    append_empty(out);
   }
-  cJSON_Delete(m);
+  if (r.nox_raw != 0xFFFF) {
+    append_u16(out, r.nox_raw);
+  } else {
+    append_empty(out);
+  }
+
   return out;
 }
 
 static std::string build_ble_history_payload(const NandStorageService::Record &r, bool last) {
-  cJSON *m = cJSON_CreateObject();
-  if (m == nullptr) {
-    return {};
-  }
-
-  // Always include date; null if not available.
-  if (r.timestamp_ms != 0) {
-    char date[32];
-    format_rfc3339_utc(r.timestamp_ms, date, sizeof(date));
-    cJSON_AddStringToObject(m, "date", date);
-  } else {
-    cJSON_AddNullToObject(m, "date");
-  }
-
-  if (r.latitude_e7 != INT32_MIN && r.longitude_e7 != INT32_MIN) {
-    cJSON_AddNumberToObject(m, "lat", (double)r.latitude_e7 / 10000000.0);
-    cJSON_AddNumberToObject(m, "lng", (double)r.longitude_e7 / 10000000.0);
-  }
-
-  // PM mass (atmospheric)
-  go_utils::json_add_u16_x10_if_valid(m, "pm01", r.pm01_ugm3_x10);
-  go_utils::json_add_u16_x10_if_valid(m, "pm02", r.pm25_ugm3_x10);
-  go_utils::json_add_u16_x10_if_valid(m, "pm10", r.pm10_ugm3_x10);
-
-  // PM counts / bins
-  go_utils::json_add_u32_x10_if_valid(m, "pm005Count", r.pc05_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pm01Count", r.pc10_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pm02Count", r.pc25_x10);
-  go_utils::json_add_u32_x10_if_valid(m, "pm10Count", r.pc100_x10);
-
-  go_utils::json_add_u16_if_valid(m, "rco2", r.co2_ppm);
-  go_utils::json_add_u16_if_valid(m, "scd4x", r.scd4x);
-  go_utils::json_add_i16_x100_if_valid(m, "atmp", r.temperature_c_x100);
-  go_utils::json_add_u16_x100_if_valid(m, "rhum", r.humidity_rh_x100);
-
-  if (r.pressure_pa != 0xFFFFFFFFu) {
-    cJSON_AddNumberToObject(m, "pres", (double)r.pressure_pa / 100.0);
-  }
-
-  go_utils::json_add_u16_if_valid(m, "tvocRaw", r.tvoc_raw);
-  go_utils::json_add_u16_if_valid(m, "noxRaw", r.nox_raw);
-
-  cJSON_AddNumberToObject(m, "route", (double)r.id);
-  cJSON_AddBoolToObject(m, "last", last);
-
-  char *json = cJSON_PrintUnformatted(m);
+  // History payload prefixes measures payload with route id and last flag.
+  // Format:
+  // route_id;last;ts_ms;lat;lng;pm01_x10;pm25_x10;pm10_x10;pc05_x10;pc10_x10;pc25_x10;pc100_x10;
+  // rco2_ppm;scd4x_ppm;atmp_c_x100;rhum_x100;pres_pa;tvoc_raw;nox_raw;
   std::string out;
-  if (json != nullptr) {
-    out.assign(json);
-    cJSON_free(json);
-  }
-  cJSON_Delete(m);
+  out.reserve(256);
+
+  char buf[16];
+  (void)snprintf(buf, sizeof(buf), "%" PRIu32, r.id);
+  out.append(buf);
+  out.push_back(';');
+  out.push_back(last ? '1' : '0');
+  out.push_back(';');
+
+  out.append(build_ble_measure_payload(r));
   return out;
 }
 
@@ -1015,17 +1084,15 @@ private:
 
     if (total == 0) {
       // Emit a single terminal packet.
-      cJSON *m = cJSON_CreateObject();
-      if (m != nullptr) {
-        cJSON_AddNullToObject(m, "date");
-        cJSON_AddBoolToObject(m, "last", true);
-        char *json = cJSON_PrintUnformatted(m);
-        if (json != nullptr) {
-          (void)ble_->notify_history(std::string(json));
-          cJSON_free(json);
-        }
-        cJSON_Delete(m);
-      }
+      // route empty, last=1, then measures payload with ts=null and the rest empty.
+      NandStorageService::Record empty;
+      std::string payload;
+      payload.reserve(64);
+      payload.push_back(';');
+      payload.push_back('1');
+      payload.push_back(';');
+      payload.append(build_ble_measure_payload(empty));
+      (void)ble_->notify_history(payload);
       ESP_LOGI(GO_TAG, "history export done (empty)");
       return;
     }
