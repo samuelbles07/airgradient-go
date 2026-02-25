@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "gps_service.h"
+#include "freertos/idf_additions.h"
+#include "freertos/projdefs.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -267,6 +269,7 @@ void GPSService::task_() {
       }
     }
 
+    vTaskDelay(pdMS_TO_TICKS(10));
     log_status_(now);
   }
 
