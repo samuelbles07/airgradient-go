@@ -190,7 +190,7 @@ static std::string build_ble_measure_payload(const NandStorageService::Record &r
   };
 
   // Measures payload: positional semicolon-separated fields (fixed order).
-  // Invalid values are emitted as empty fields, except timestamp which is "null" when missing.
+  // Invalid values are emitted as empty fields.
   // Format:
   // ts_ms;lat;lng;pm01_x10;pm25_x10;pm10_x10;pc05_x10;pc10_x10;pc25_x10;pc100_x10;
   // rco2_ppm;scd4x_ppm;atmp_c_x100;rhum_x100;pres_pa;tvoc_raw;nox_raw;
