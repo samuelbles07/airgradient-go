@@ -75,6 +75,10 @@ class NandStorageService {
     // SCD4x test-only CO2.
     uint16_t scd4x = 0xFFFF;
 
+    // Senseair test-only CO2 (I2C).
+    uint16_t s12 = 0xFFFF;
+    uint16_t sunlight = 0xFFFF;
+
     // Ambient temperature/humidity.
     int16_t temperature_c_x100 = (int16_t)INT16_MIN;
     uint16_t humidity_rh_x100 = 0xFFFF;

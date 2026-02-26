@@ -60,6 +60,10 @@ extern "C" {
 #include "sensirion_i2c_hal_esp_idf.h"
 }
 
+// Senseair I2C CO2 (test-only)
+#include "s12_i2c.h"
+#include "sunrise_i2c.h"
+
 // NOTE: Temporary constants
 #define NO_INACTIVE_NO_SLEEP 1
 #define TRACKING_DISPLAY_SLEEP 0
@@ -193,9 +197,9 @@ static std::string build_ble_measure_payload(const NandStorageService::Record &r
   // Invalid values are emitted as empty fields.
   // Format:
   // ts_ms;lat;lng;pm01_x10;pm25_x10;pm10_x10;pc05_x10;pc10_x10;pc25_x10;pc100_x10;
-  // rco2_ppm;scd4x_ppm;atmp_c_x100;rhum_x100;pres_pa;tvoc_raw;nox_raw;
+  // rco2_ppm;scd4x_ppm;atmp_c_x100;rhum_x100;pres_pa;tvoc_raw;nox_raw;s12_ppm;sunlight_ppm;
   std::string out;
-  out.reserve(192);
+  out.reserve(216);
 
   if (r.timestamp_ms != 0) {
     append_u64(out, r.timestamp_ms);
@@ -297,6 +301,18 @@ static std::string build_ble_measure_payload(const NandStorageService::Record &r
     append_empty(out);
   }
 
+  if (r.s12 != 0xFFFF) {
+    append_u16(out, r.s12);
+  } else {
+    append_empty(out);
+  }
+
+  if (r.sunlight != 0xFFFF) {
+    append_u16(out, r.sunlight);
+  } else {
+    append_empty(out);
+  }
+
   return out;
 }
 
@@ -304,7 +320,7 @@ static std::string build_ble_history_payload(const NandStorageService::Record &r
   // History payload prefixes measures payload with route id and last flag.
   // Format:
   // route_id;last;ts_ms;lat;lng;pm01_x10;pm25_x10;pm10_x10;pc05_x10;pc10_x10;pc25_x10;pc100_x10;
-  // rco2_ppm;scd4x_ppm;atmp_c_x100;rhum_x100;pres_pa;tvoc_raw;nox_raw;
+  // rco2_ppm;scd4x_ppm;atmp_c_x100;rhum_x100;pres_pa;tvoc_raw;nox_raw;s12_ppm;sunlight_ppm;
   std::string out;
   out.reserve(256);
 
@@ -398,6 +414,10 @@ static std::string build_measures_payload(const NandStorageService::Record *recs
 
     // Temporary server mapping: SCD4x CO2 is posted as pm003Count
     go_utils::json_add_u16_if_valid(m, "pm003Count", recs[i].scd4x);
+
+    // Senseair I2C CO2 (temporary field names).
+    go_utils::json_add_u16_if_valid(m, "s12", recs[i].s12);
+    go_utils::json_add_u16_if_valid(m, "sunlight", recs[i].sunlight);
 
     go_utils::json_add_u16_if_valid(m, "rco2", recs[i].co2_ppm);
     go_utils::json_add_i16_x100_if_valid(m, "atmp", recs[i].temperature_c_x100);
@@ -789,17 +809,18 @@ class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
                TVOCNOxSensor *tvoc_nox_sensor, CO2Sensor *co2_sensor, dps368_handle_t *dps368,
-               Scd4xTest *scd4x,
+               Scd4xTest *scd4x, s12_i2c_t *s12, sunrise_i2c_t *sunrise,
                BLEStream *ble,
                i2c_master_bus_handle_t i2c_bus, GPSService *gps, ui::DashboardUI *ui,
                ssd1680x::panels::GDEY0213B74 *epd, NandStorageService *storage,
                drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
-      : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
-        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), scd4x_(scd4x), ble_(ble),
-        i2c_bus_(i2c_bus), gps_(gps),
-        ui_(ui), epd_(epd),
-        storage_(storage), charger_(charger),
-        last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
+       : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
+         tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), scd4x_(scd4x),
+         s12_(s12), sunrise_(sunrise), ble_(ble),
+         i2c_bus_(i2c_bus), gps_(gps),
+         ui_(ui), epd_(epd),
+         storage_(storage), charger_(charger),
+         last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
     if (p == nullptr) {
@@ -882,6 +903,8 @@ private:
   CO2Sensor *co2_sensor_ = nullptr;
   dps368_handle_t *dps368_ = nullptr;
   Scd4xTest *scd4x_ = nullptr;
+  s12_i2c_t *s12_ = nullptr;
+  sunrise_i2c_t *sunrise_ = nullptr;
   BLEStream *ble_ = nullptr;
   i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
@@ -916,6 +939,12 @@ private:
 
   bool scd4x_last_valid_ = false;
   uint16_t scd4x_last_ppm_ = 0;
+
+  bool s12_last_valid_ = false;
+  uint16_t s12_last_ppm_ = 0;
+
+  bool sunlight_last_valid_ = false;
+  uint16_t sunlight_last_ppm_ = 0;
 
   bool pending_co2_force_calib_ = false;
   uint16_t pending_co2_force_calib_ppm_ = 400;
@@ -1034,6 +1063,17 @@ private:
     const uint16_t ppm = pending_co2_force_calib_ppm_;
     pending_co2_force_calib_ = false;
 
+    // Blocking calibrations can take tens of seconds; give watchdogs a fresh interval.
+    {
+      const uint32_t now = now_ms();
+      reset_ext_watchdog();
+      last_wdt_reset_ms_ = now;
+      if (charger_ != nullptr) {
+        (void)charger_->reset_watchdog();
+        last_bq_wdt_reset_ms_ = now;
+      }
+    }
+
     // Run STCC4 calibration first (if supported).
     if (co2_sensor_ != nullptr && co2_sensor_->support_force_calibration()) {
       ESP_LOGI(GO_TAG, "co2ForceCalib (stcc4) begin target=%u ppm", (unsigned)ppm);
@@ -1046,6 +1086,18 @@ private:
     // Then run SCD4x (SCD43) calibration (test-only integration).
     if (scd4x_ != nullptr && scd4x_->initialized) {
       _scd4x_force_calibration_(ppm);
+    }
+
+    // Senseair I2C test-only sensors (blocking; ok for up to ~1 minute).
+    if (s12_ != nullptr) {
+      ESP_LOGI(GO_TAG, "co2ForceCalib (s12) begin target=%u ppm", (unsigned)ppm);
+      const esp_err_t err = s12_i2c_force_calibration(s12_, ppm, 0);
+      ESP_LOGI(GO_TAG, "co2ForceCalib (s12) %s", (err == ESP_OK) ? "ok" : esp_err_to_name(err));
+    }
+    if (sunrise_ != nullptr) {
+      ESP_LOGI(GO_TAG, "co2ForceCalib (sunlight) begin target=%u ppm", (unsigned)ppm);
+      const esp_err_t err = sunrise_i2c_force_calibration(sunrise_, ppm, 0);
+      ESP_LOGI(GO_TAG, "co2ForceCalib (sunlight) %s", (err == ESP_OK) ? "ok" : esp_err_to_name(err));
     }
 
     co2_calibrating_ = false;
@@ -1879,6 +1931,31 @@ private:
       }
     }
 
+    if (s12_ != nullptr) {
+      uint16_t ppm = 0;
+      const esp_err_t err = s12_i2c_read_co2_ppm(s12_, &ppm);
+      if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+        s12_last_valid_ = true;
+        s12_last_ppm_ = ppm;
+        ESP_LOGI(GO_TAG, "s12: co2=%u", (unsigned)ppm);
+      } else if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "s12 read failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    if (sunrise_ != nullptr) {
+      uint16_t ppm = 0;
+      uint8_t e_status = 0;
+      const esp_err_t err = sunrise_i2c_read_co2_ppm(sunrise_, &ppm, &e_status);
+      if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+        sunlight_last_valid_ = true;
+        sunlight_last_ppm_ = ppm;
+        ESP_LOGI(GO_TAG, "sunlight: co2=%u", (unsigned)ppm);
+      } else if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "sunlight read failed: %s", esp_err_to_name(err));
+      }
+    }
+
     dps368_data_t dps = {};
     bool pressure_valid = false;
 
@@ -1974,6 +2051,13 @@ private:
 
       if (scd4x_last_valid_) {
         rec.scd4x = scd4x_last_ppm_;
+      }
+
+      if (s12_last_valid_) {
+        rec.s12 = s12_last_ppm_;
+      }
+      if (sunlight_last_valid_) {
+        rec.sunlight = sunlight_last_ppm_;
       }
 
       if (pressure_valid) {
@@ -2373,6 +2457,31 @@ private:
       }
     }
 
+    if (s12_ != nullptr) {
+      uint16_t ppm = 0;
+      const esp_err_t err = s12_i2c_read_co2_ppm(s12_, &ppm);
+      if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+        s12_last_valid_ = true;
+        s12_last_ppm_ = ppm;
+        ESP_LOGI(GO_TAG, "s12: co2=%u", (unsigned)ppm);
+      } else if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "s12 read failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    if (sunrise_ != nullptr) {
+      uint16_t ppm = 0;
+      uint8_t e_status = 0;
+      const esp_err_t err = sunrise_i2c_read_co2_ppm(sunrise_, &ppm, &e_status);
+      if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+        sunlight_last_valid_ = true;
+        sunlight_last_ppm_ = ppm;
+        ESP_LOGI(GO_TAG, "sunlight: co2=%u", (unsigned)ppm);
+      } else if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "sunlight read failed: %s", esp_err_to_name(err));
+      }
+    }
+
     TVOCNOxData gas = {};
     bool tvoc_valid = false;
     bool nox_valid = false;
@@ -2504,6 +2613,13 @@ private:
 
     if (scd4x_last_valid_) {
       rec.scd4x = scd4x_last_ppm_;
+    }
+
+    if (s12_last_valid_) {
+      rec.s12 = s12_last_ppm_;
+    }
+    if (sunlight_last_valid_) {
+      rec.sunlight = sunlight_last_ppm_;
     }
 
     // Pressure.
@@ -2654,6 +2770,42 @@ extern "C" void app_main(void) {
       scd4x.initialized = true;
       scd4x_ptr = &scd4x;
       ESP_LOGI(GO_TAG, "SCD4x initialized (test-only)");
+    }
+  }
+
+  // Senseair I2C CO2 (test-only). Both S12 and Sunrise share address 0x68.
+  static s12_i2c_t s12;
+  s12_i2c_t *s12_ptr = nullptr;
+  static sunrise_i2c_t sunrise;
+  sunrise_i2c_t *sunrise_ptr = nullptr;
+  {
+    // Detect S12 by its firmware type register (0x2F == 0xC2 per S12 docs).
+    esp_err_t err = s12_i2c_create(bus_handle, S12_I2C_ADDR_DEFAULT, 100000, &s12);
+    if (err == ESP_OK) {
+      const uint8_t reg = 0x2F;
+      uint8_t fw_type = 0;
+      err = i2c_master_transmit_receive(s12.dev, &reg, 1, &fw_type, 1, 1000);
+      if (err == ESP_OK && fw_type == 0xC2) {
+        s12_ptr = &s12;
+        ESP_LOGI(GO_TAG, "S12 initialized (test-only)");
+      } else {
+        s12_i2c_destroy(&s12);
+      }
+    }
+
+    if (s12_ptr == nullptr) {
+      err = sunrise_i2c_create(bus_handle, SUNRISE_I2C_ADDR_DEFAULT, 100000, &sunrise);
+      if (err == ESP_OK) {
+        uint16_t ppm = 0;
+        uint8_t e_status = 0;
+        err = sunrise_i2c_read_co2_ppm(&sunrise, &ppm, &e_status);
+        if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+          sunrise_ptr = &sunrise;
+          ESP_LOGI(GO_TAG, "Sunrise initialized (test-only; BLE field name 'sunlight')");
+        } else {
+          sunrise_i2c_destroy(&sunrise);
+        }
+      }
     }
   }
 
@@ -2811,7 +2963,7 @@ extern "C" void app_main(void) {
 
   static BLEStream ble;
   GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, co2_sensor_ptr,
-                  dps368_ptr, scd4x_ptr, &ble, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr,
+                  dps368_ptr, scd4x_ptr, s12_ptr, sunrise_ptr, &ble, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr,
                   charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));

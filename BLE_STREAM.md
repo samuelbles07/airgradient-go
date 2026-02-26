@@ -48,7 +48,7 @@ Format: positional, semicolon-separated fields.
 - Latitude/longitude are sent as decimal degrees strings (may include `-`), up to 7 decimals with trailing zeros trimmed.
 - The payload always ends with a trailing `;`.
 
-Field order (17 fields):
+Field order (19 fields):
 
 0. `ts_ms` (epoch ms, or empty)
 1. `lat` (decimal degrees)
@@ -67,17 +67,19 @@ Field order (17 fields):
 14. `pres_pa` (pressure in Pa)
 15. `tvoc_raw` (SGP41 raw)
 16. `nox_raw` (SGP41 raw)
+17. `s12_ppm` (Senseair S12 CO2 ppm, test integration)
+18. `sunlight_ppm` (Senseair Sunrise CO2 ppm, test integration; BLE field name is `sunlight`)
 
 Example:
 
 ```text
-1708837804000;43.237289;76.891928;190;202;204;1274;1507;1514;1515;2596;400;534;3929;92752;33897;19157;
+1708837804000;43.237289;76.891928;190;202;204;1274;1507;1514;1515;2596;400;534;3929;92752;33897;19157;;;
 ```
 
 Example (invalid values are empty fields; here `lng`, `pm10_x10`, `rco2_ppm`, `scd4x_ppm` are missing):
 
 ```text
-1708837804000;43.237289;;190;202;;1274;1507;1514;1515;;;534;3929;92752;33897;19157;
+1708837804000;43.237289;;190;202;;1274;1507;1514;1515;;;534;3929;92752;33897;19157;;;
 ```
 
 Parsing tip: split on `;` and keep empty fields (do not drop empty tokens).
@@ -101,7 +103,7 @@ function parseOptFloat(str):
 
 function parseMeasuresPayload(s):
   f = splitPayload(s)
-  assert f.length == 17
+  assert f.length == 19
 
   ts_ms     = parseOptInt(f[0])
   lat       = parseOptFloat(f[1])
@@ -124,6 +126,8 @@ function parseMeasuresPayload(s):
   pres_pa   = parseOptInt(f[14])
   tvoc_raw  = parseOptInt(f[15])
   nox_raw   = parseOptInt(f[16])
+  s12_ppm   = parseOptInt(f[17])
+  sunlight  = parseOptInt(f[18])
 ```
 
 ### 2) `history` (Notify)
@@ -140,18 +144,18 @@ Field order:
 
 0. `route_id` (tracking session id / route id)
 1. `last` (`1` if this is the last record in storage, else `0`)
-2..18. Same 17 fields as `measures` (see above)
+2..20. Same 19 fields as `measures` (see above)
 
 Example:
 
 ```text
-12345;0;1708837804000;43.237289;76.891928;190;202;204;1274;1507;1514;1515;2596;400;534;3929;92752;33897;19157;
+12345;0;1708837804000;43.237289;76.891928;190;202;204;1274;1507;1514;1515;2596;400;534;3929;92752;33897;19157;;;
 ```
 
 Example (invalid values are empty fields; here `lng`, `pm10_x10`, `rco2_ppm`, `scd4x_ppm` are missing):
 
 ```text
-12345;0;1708837804000;43.237289;;190;202;;1274;1507;1514;1515;;;534;3929;92752;33897;19157;
+12345;0;1708837804000;43.237289;;190;202;;1274;1507;1514;1515;;;534;3929;92752;33897;19157;;;
 ```
 
 Pseudo code (illustrative, not language-specific):
@@ -159,12 +163,12 @@ Pseudo code (illustrative, not language-specific):
 ```text
 function parseHistoryPayload(s):
   f = splitPayload(s)
-  assert f.length == 19
+  assert f.length == 21
 
   route_id = parseOptInt(f[0])
   last     = (f[1] == "1")
 
-  // Measures fields are f[2]..f[18] in the same order as the measures payload.
+  // Measures fields are f[2]..f[20] in the same order as the measures payload.
   // (You can parse them by position directly, or reconstruct a measures string and reuse a parser.)
 ```
 
