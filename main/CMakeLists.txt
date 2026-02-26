@@ -28,6 +28,8 @@ set(srcs
     "button_service.cpp"
     "gps_service.cpp"
     "nand_storage_service.cpp"
+    "s12_i2c.c"
+    "sunrise_i2c.c"
     "ui/u8g2_canvas.cpp"
     "ui/dashboard_ui.cpp"
 )
