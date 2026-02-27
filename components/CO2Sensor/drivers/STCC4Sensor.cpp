@@ -10,6 +10,9 @@
 #include "esp_err.h"
 #include "esp_log.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include <string.h>
 
 STCC4Sensor::STCC4Sensor(i2c_master_bus_handle_t bus_handle, uint8_t i2c_addr)
@@ -35,22 +38,51 @@ bool STCC4Sensor::init() {
     return true;
   }
 
-  esp_err_t err = stcc4_init(&dev_, bus_handle_, i2c_addr_);
+  // Cold boot can be noisy on I2C; probe + retry start.
+  static constexpr int PROBE_RETRIES = 10;
+  static constexpr int START_RETRIES = 5;
+  static constexpr int RETRY_DELAY_MS = 50;
+
+  esp_err_t err = ESP_FAIL;
+  for (int attempt = 0; attempt < PROBE_RETRIES; ++attempt) {
+    err = i2c_master_probe(bus_handle_, i2c_addr_, 20);
+    if (err == ESP_OK) {
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
+  }
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "stcc4_init failed: %s", esp_err_to_name(err));
-    memset(&dev_, 0, sizeof(dev_));
+    ESP_LOGW(TAG, "probe failed addr=0x%02X: %s", (unsigned)i2c_addr_, esp_err_to_name(err));
     return false;
   }
 
-  err = stcc4_start_continuous_measurement(&dev_);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "stcc4_start_continuous_measurement failed: %s", esp_err_to_name(err));
+  for (int attempt = 0; attempt < START_RETRIES; ++attempt) {
+    err = stcc4_init(&dev_, bus_handle_, i2c_addr_);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "stcc4_init failed (attempt %d/%d): %s", attempt + 1, START_RETRIES,
+               esp_err_to_name(err));
+      memset(&dev_, 0, sizeof(dev_));
+      vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
+      continue;
+    }
+
+    // Small settle delay before the first command.
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    err = stcc4_start_continuous_measurement(&dev_);
+    if (err == ESP_OK) {
+      return true;
+    }
+
+    ESP_LOGW(TAG, "stcc4_start_continuous_measurement failed (attempt %d/%d): %s", attempt + 1,
+             START_RETRIES, esp_err_to_name(err));
+
     (void)stcc4_deinit(&dev_);
     memset(&dev_, 0, sizeof(dev_));
-    return false;
+    vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
   }
 
-  return true;
+  return false;
 }
 
 bool STCC4Sensor::read(CO2Data &out) {

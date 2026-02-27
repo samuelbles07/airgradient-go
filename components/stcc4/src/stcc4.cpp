@@ -75,7 +75,7 @@ static esp_err_t stcc4_i2c_write_command(stcc4_dev_t *dev, uint16_t cmd) {
     uint8_t buf[2];
     buf[0] = (cmd >> 8) & 0xFF;
     buf[1] = cmd & 0xFF;
-    return i2c_master_transmit(dev->dev_handle, buf, 2, -1);
+    return i2c_master_transmit(dev->dev_handle, buf, 2, 1000);
 }
 
 static esp_err_t stcc4_i2c_write_command_with_data(stcc4_dev_t *dev, uint16_t cmd, 
@@ -94,11 +94,11 @@ static esp_err_t stcc4_i2c_write_command_with_data(stcc4_dev_t *dev, uint16_t cm
         buf[pos++] = stcc4_calculate_crc(data[i], data[i + 1]);
     }
     
-    return i2c_master_transmit(dev->dev_handle, buf, pos, -1);
+    return i2c_master_transmit(dev->dev_handle, buf, pos, 1000);
 }
 
 static esp_err_t stcc4_i2c_read(stcc4_dev_t *dev, uint8_t *buf, size_t len) {
-    return i2c_master_receive(dev->dev_handle, buf, len, -1);
+    return i2c_master_receive(dev->dev_handle, buf, len, 1000);
 }
 
 static esp_err_t stcc4_read_word(stcc4_dev_t *dev, uint16_t *value) {
