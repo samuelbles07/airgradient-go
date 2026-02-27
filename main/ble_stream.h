@@ -44,6 +44,7 @@ class BLEStream {
   bool notify_history(const std::string& json);
   bool take_pending_tracking_sleep_interval_s(uint32_t* out);
   bool take_pending_co2_force_calib(uint16_t* out_ppm);
+  bool take_pending_tracking(bool* out_enabled);
   bool take_pending_history_start();
 
  private:
@@ -57,6 +58,7 @@ class BLEStream {
 
   void request_tracking_sleep_interval_s_(uint32_t s);
   void request_co2_force_calib_(uint16_t ppm);
+  void request_tracking_(bool enabled);
   void request_history_start_();
 
   std::atomic<bool> running_{false};
@@ -69,6 +71,9 @@ class BLEStream {
 
   std::atomic<bool> pending_co2_force_calib_{false};
   std::atomic<uint16_t> pending_co2_force_calib_ppm_{0};
+
+  std::atomic<bool> pending_tracking_{false};
+  std::atomic<bool> pending_tracking_enabled_{false};
 
   std::atomic<bool> pending_history_start_{false};
 

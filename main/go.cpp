@@ -886,6 +886,7 @@ public:
 
       _apply_ble_config_if_needed();
       _co2_force_calibrate_if_needed();
+      _apply_ble_tracking_if_needed();
       _kick_watchdogs_if_needed();
       _poll_usb_c_if_needed();
       Inputs inputs = _poll_inputs();
@@ -948,6 +949,9 @@ private:
 
   bool pending_co2_force_calib_ = false;
   uint16_t pending_co2_force_calib_ppm_ = 400;
+
+  bool pending_ble_tracking_ = false;
+  bool pending_ble_tracking_enabled_ = false;
 
   bool co2_calibrating_ = false;
 
@@ -1051,6 +1055,53 @@ private:
         ble_status_dirty_ = false;
       }
     }
+
+    bool enabled = false;
+    if (ble_->take_pending_tracking(&enabled)) {
+      pending_ble_tracking_ = true;
+      pending_ble_tracking_enabled_ = enabled;
+    }
+  }
+
+  void _apply_ble_tracking_if_needed(void) {
+    if (!pending_ble_tracking_) {
+      return;
+    }
+    pending_ble_tracking_ = false;
+
+    if (pending_ble_tracking_enabled_) {
+      // Start tracking: only allowed in IDLE.
+      if (_state != State::Idle) {
+        ESP_LOGW(GO_TAG, "BLE tracking start ignored: state=%s", state_name(_state));
+        return;
+      }
+      _start_new_tracking_session();
+      _transition(State::Tracking);
+      return;
+    }
+
+    // Stop tracking: only allowed in TRACKING.
+    if (_state != State::Tracking) {
+      ESP_LOGW(GO_TAG, "BLE tracking stop ignored: state=%s", state_name(_state));
+      return;
+    }
+
+#if NO_INACTIVE_NO_SLEEP == 1
+    // In dev mode we don't reboot between modes, but TRACKING deep-sleeps the panel after
+    // full_refresh(). Ensure we wake and restore basemap prerequisites before switching to
+    // IDLE (which uses partial refresh).
+    if (ui_ != nullptr) {
+      (void)ui_->set_tracking(false);
+      (void)ui_->set_syncing(false);
+      (void)ui_->set_gps_fixed(false);
+      const esp_err_t err = ui_->full_refresh();
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(err));
+      }
+    }
+#endif
+
+    _transition(State::Idle);
   }
 
   void _co2_force_calibrate_if_needed(void) {

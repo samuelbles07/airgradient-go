@@ -153,6 +153,21 @@ class BLEStreamConfigCallbacks : public NimBLECharacteristicCallbacks {
             ESP_LOGI(TAG, "config co2ForceCalib=%" PRIu32, nv);
           }
         }
+
+        const cJSON* tr = cJSON_GetObjectItemCaseSensitive(root, "tracking");
+        if (cJSON_IsBool(tr)) {
+          const bool enabled = cJSON_IsTrue(tr);
+          s_->request_tracking_(enabled);
+          ESP_LOGI(TAG, "config tracking=%d", (int)enabled);
+        } else if (cJSON_IsNumber(tr)) {
+          const double dv = tr->valuedouble;
+          const uint32_t nv = (uint32_t)llround(dv);
+          if ((double)nv == dv && (nv == 0 || nv == 1)) {
+            const bool enabled = (nv == 1);
+            s_->request_tracking_(enabled);
+            ESP_LOGI(TAG, "config tracking=%d", (int)enabled);
+          }
+        }
       }
       cJSON_Delete(root);
     }
@@ -193,6 +208,7 @@ esp_err_t BLEStream::start(const char* device_name) {
   history_subscribed_.store(false);
 
   pending_history_start_.store(false);
+  pending_tracking_.store(false);
 
   if (!NimBLEDevice::init(std::string(device_name))) {
     ESP_LOGW(TAG, "NimBLEDevice::init failed");
@@ -295,6 +311,7 @@ void BLEStream::stop() {
   history_subscribed_.store(false);
 
   pending_history_start_.store(false);
+  pending_tracking_.store(false);
 
   // Stop advertising and disconnect peers best-effort.
   (void)NimBLEDevice::stopAdvertising();
@@ -327,6 +344,11 @@ void BLEStream::request_co2_force_calib_(uint16_t ppm) {
   pending_co2_force_calib_.store(true, std::memory_order_relaxed);
 }
 
+void BLEStream::request_tracking_(bool enabled) {
+  pending_tracking_enabled_.store(enabled, std::memory_order_relaxed);
+  pending_tracking_.store(true, std::memory_order_relaxed);
+}
+
 void BLEStream::request_history_start_() {
   pending_history_start_.store(true, std::memory_order_relaxed);
 }
@@ -353,6 +375,18 @@ bool BLEStream::take_pending_co2_force_calib(uint16_t* out_ppm) {
     return false;
   }
   *out_ppm = pending_co2_force_calib_ppm_.load(std::memory_order_relaxed);
+  return true;
+}
+
+bool BLEStream::take_pending_tracking(bool* out_enabled) {
+  if (out_enabled == nullptr) {
+    return false;
+  }
+  const bool had = pending_tracking_.exchange(false, std::memory_order_relaxed);
+  if (!had) {
+    return false;
+  }
+  *out_enabled = pending_tracking_enabled_.load(std::memory_order_relaxed);
   return true;
 }
 

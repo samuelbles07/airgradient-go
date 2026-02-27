@@ -203,6 +203,10 @@ Supported keys:
   - Runs STCC4 calibration first (if supported), then SCD4x forced recalibration (if SCD4x is initialized).
   - While pending/running, `status` notifications include `co2Calibrating=true`.
 
+- `tracking`: boolean
+  - `true`: start tracking (only in `IDLE`, allocates a new route id)
+  - `false`: stop tracking (only in `TRACKING`)
+
 Example:
 
 ```json
@@ -211,6 +215,14 @@ Example:
 
 ```json
 {"co2ForceCalib": 400}
+```
+
+```json
+{"tracking": true}
+```
+
+```json
+{"tracking": false}
 ```
 
 ## History Export Procedure
