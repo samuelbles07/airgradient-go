@@ -185,6 +185,7 @@ Optional fields:
 - `gps_fix`: boolean (only present when GPS service is available)
 - `gps_sats`: number (only present when GPS service is available)
 - `battery_percent`: number (only present when battery percent is available)
+- `flashAvail`: number (kilobytes; only present when NAND storage is mounted/ready)
 - `charging`: boolean (only present when charging state is known)
 - `co2Calibrating`: boolean (only present while a CO2 force-calibration request is pending/running)
 

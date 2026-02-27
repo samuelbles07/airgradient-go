@@ -24,6 +24,7 @@
 #include "esp_timer.h"
 #include "esp_http_client.h"
 #include "esp_console.h"
+#include "esp_vfs_fat.h"
 #include "cJSON.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
@@ -340,6 +341,8 @@ static std::string build_ble_status_payload(State s,
                                             const GPSService::Data &gps,
                                             bool battery_ok,
                                             int battery_percent,
+                                            bool flash_ok,
+                                            uint32_t flash_avail_kb,
                                             bool have_charging,
                                             bool charging,
                                             uint32_t route_id,
@@ -364,6 +367,9 @@ static std::string build_ble_status_payload(State s,
   }
   if (battery_ok) {
     cJSON_AddNumberToObject(root, "battery_percent", (double)battery_percent);
+  }
+  if (flash_ok) {
+    cJSON_AddNumberToObject(root, "flashAvail", (double)flash_avail_kb);
   }
   if (have_charging) {
     cJSON_AddBoolToObject(root, "charging", charging);
@@ -796,12 +802,13 @@ static void initConsole() {
   usb_serial_jtag_vfs_use_driver();
 
   /* Initialize the console */
-  esp_console_config_t console_config = {.max_cmdline_length = CONSOLE_MAX_CMDLINE_LENGTH,
-                                         .max_cmdline_args = CONSOLE_MAX_CMDLINE_ARGS,
+  esp_console_config_t console_config = {};
+  console_config.max_cmdline_length = CONSOLE_MAX_CMDLINE_LENGTH;
+  console_config.max_cmdline_args = CONSOLE_MAX_CMDLINE_ARGS;
 #if CONFIG_LOG_COLORS
-                                         .hint_color = atoi(LOG_COLOR_CYAN)
+  console_config.hint_color = atoi(LOG_COLOR_CYAN);
 #endif
-  };
+  console_config.hint_bold = 0;
   ESP_ERROR_CHECK(esp_console_init(&console_config));
 }
 
@@ -939,6 +946,10 @@ private:
   bool battery_percent_ok_ = false;
   int battery_percent_ = -1;
 
+  bool flash_avail_ok_ = false;
+  uint32_t flash_avail_kb_ = 0;
+  uint32_t last_flash_avail_sample_ms_ = 0;
+
   bool scd4x_last_valid_ = false;
   uint16_t scd4x_last_ppm_ = 0;
 
@@ -977,9 +988,11 @@ private:
       gps_ok = true;
     }
     _sample_battery_percent();
+    _sample_flash_avail_if_needed();
 
     const std::string payload = build_ble_status_payload(
-        s, gps_ok, d, battery_percent_ok_, battery_percent_, charger_vbus_seen_, usb_c_adapter_present_,
+        s, gps_ok, d, battery_percent_ok_, battery_percent_, flash_avail_ok_, flash_avail_kb_,
+        charger_vbus_seen_, usb_c_adapter_present_,
         tracking_session_id_, tracking_sleep_interval_s_, co2_calibrating_);
     ble_->notify_status(payload);
   }
@@ -1018,6 +1031,35 @@ private:
     }
     battery_percent_ok_ = true;
     battery_percent_ = (int)perc;
+  }
+
+  void _sample_flash_avail_if_needed(void) {
+    // Only available when NAND storage is mounted/ready.
+    if (storage_ == nullptr || !storage_->is_ready()) {
+      flash_avail_ok_ = false;
+      return;
+    }
+
+    static constexpr uint32_t SAMPLE_INTERVAL_MS = 10000;
+    const uint32_t now = now_ms();
+    if (last_flash_avail_sample_ms_ != 0 && (now - last_flash_avail_sample_ms_) < SAMPLE_INTERVAL_MS) {
+      return;
+    }
+    last_flash_avail_sample_ms_ = now;
+
+    uint64_t total_bytes = 0;
+    uint64_t free_bytes = 0;
+    const esp_err_t err = esp_vfs_fat_info(GO_NAND_MOUNT_PATH, &total_bytes, &free_bytes);
+    if (err != ESP_OK) {
+      flash_avail_ok_ = false;
+      return;
+    }
+
+    flash_avail_ok_ = true;
+    flash_avail_kb_ = (uint32_t)(free_bytes / 1024ULL);
+
+    ESP_LOGI(GO_TAG, "flash: total=%" PRIu64 " free=%" PRIu64 " avail_kb=%" PRIu32,
+             total_bytes, free_bytes, flash_avail_kb_);
   }
 
   void _apply_ble_config_if_needed(void) {
@@ -1335,8 +1377,10 @@ private:
       ble_->notify_measures(payload);
     }
     if (ble_->status_subscribed()) {
+      _sample_flash_avail_if_needed();
       const std::string payload = build_ble_status_payload(
-          _state, gps_ok, gps, battery_percent_ok_, battery_percent_, charger_vbus_seen_,
+          _state, gps_ok, gps, battery_percent_ok_, battery_percent_, flash_avail_ok_, flash_avail_kb_,
+          charger_vbus_seen_,
           usb_c_adapter_present_, rec.id, tracking_sleep_interval_s_, co2_calibrating_);
       ble_->notify_status(payload);
     }
