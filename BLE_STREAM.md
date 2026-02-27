@@ -207,6 +207,9 @@ Supported keys:
   - `true`: start tracking (only in `IDLE`, allocates a new route id)
   - `false`: stop tracking (only in `TRACKING`)
 
+- `flashErase`: boolean
+  - `true`: clears NAND tracking log (only in `IDLE`)
+
 Example:
 
 ```json
@@ -223,6 +226,10 @@ Example:
 
 ```json
 {"tracking": false}
+```
+
+```json
+{"flashErase": true}
 ```
 
 ## History Export Procedure

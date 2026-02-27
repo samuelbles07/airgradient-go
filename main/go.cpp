@@ -886,6 +886,7 @@ public:
 
       _apply_ble_config_if_needed();
       _co2_force_calibrate_if_needed();
+      _apply_ble_flash_erase_if_needed();
       _apply_ble_tracking_if_needed();
       _kick_watchdogs_if_needed();
       _poll_usb_c_if_needed();
@@ -952,6 +953,8 @@ private:
 
   bool pending_ble_tracking_ = false;
   bool pending_ble_tracking_enabled_ = false;
+
+  bool pending_ble_flash_erase_ = false;
 
   bool co2_calibrating_ = false;
 
@@ -1061,6 +1064,26 @@ private:
       pending_ble_tracking_ = true;
       pending_ble_tracking_enabled_ = enabled;
     }
+
+    if (ble_->take_pending_flash_erase()) {
+      pending_ble_flash_erase_ = true;
+    }
+  }
+
+  void _apply_ble_flash_erase_if_needed(void) {
+    if (!pending_ble_flash_erase_) {
+      return;
+    }
+    pending_ble_flash_erase_ = false;
+
+    // Only allow flash erase from IDLE.
+    if (_state != State::Idle) {
+      ESP_LOGW(GO_TAG, "BLE flashErase ignored: state=%s", state_name(_state));
+      return;
+    }
+
+    ESP_LOGW(GO_TAG, "BLE flashErase requested");
+    _clear_tracking_logs();
   }
 
   void _apply_ble_tracking_if_needed(void) {
@@ -1408,6 +1431,17 @@ private:
     if (!storage_->is_ready()) {
       ESP_LOGW(GO_TAG, "clear logs: storage not ready");
       return;
+    }
+
+    // Clear can block; reset watchdogs to give us margin.
+    {
+      const uint32_t now = now_ms();
+      reset_ext_watchdog();
+      last_wdt_reset_ms_ = now;
+      if (charger_ != nullptr) {
+        (void)charger_->reset_watchdog();
+        last_bq_wdt_reset_ms_ = now;
+      }
     }
 
     const TickType_t to = pdMS_TO_TICKS(GO_NAND_CMD_TIMEOUT_MS);

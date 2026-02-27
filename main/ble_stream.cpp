@@ -168,6 +168,21 @@ class BLEStreamConfigCallbacks : public NimBLECharacteristicCallbacks {
             ESP_LOGI(TAG, "config tracking=%d", (int)enabled);
           }
         }
+
+        const cJSON* fe = cJSON_GetObjectItemCaseSensitive(root, "flashErase");
+        if (cJSON_IsBool(fe)) {
+          if (cJSON_IsTrue(fe)) {
+            s_->request_flash_erase_();
+            ESP_LOGI(TAG, "config flashErase=1");
+          }
+        } else if (cJSON_IsNumber(fe)) {
+          const double dv = fe->valuedouble;
+          const uint32_t nv = (uint32_t)llround(dv);
+          if ((double)nv == dv && nv == 1) {
+            s_->request_flash_erase_();
+            ESP_LOGI(TAG, "config flashErase=1");
+          }
+        }
       }
       cJSON_Delete(root);
     }
@@ -209,6 +224,7 @@ esp_err_t BLEStream::start(const char* device_name) {
 
   pending_history_start_.store(false);
   pending_tracking_.store(false);
+  pending_flash_erase_.store(false);
 
   if (!NimBLEDevice::init(std::string(device_name))) {
     ESP_LOGW(TAG, "NimBLEDevice::init failed");
@@ -312,6 +328,7 @@ void BLEStream::stop() {
 
   pending_history_start_.store(false);
   pending_tracking_.store(false);
+  pending_flash_erase_.store(false);
 
   // Stop advertising and disconnect peers best-effort.
   (void)NimBLEDevice::stopAdvertising();
@@ -347,6 +364,10 @@ void BLEStream::request_co2_force_calib_(uint16_t ppm) {
 void BLEStream::request_tracking_(bool enabled) {
   pending_tracking_enabled_.store(enabled, std::memory_order_relaxed);
   pending_tracking_.store(true, std::memory_order_relaxed);
+}
+
+void BLEStream::request_flash_erase_() {
+  pending_flash_erase_.store(true, std::memory_order_relaxed);
 }
 
 void BLEStream::request_history_start_() {
@@ -388,6 +409,10 @@ bool BLEStream::take_pending_tracking(bool* out_enabled) {
   }
   *out_enabled = pending_tracking_enabled_.load(std::memory_order_relaxed);
   return true;
+}
+
+bool BLEStream::take_pending_flash_erase() {
+  return pending_flash_erase_.exchange(false, std::memory_order_relaxed);
 }
 
 bool BLEStream::take_pending_history_start() {
