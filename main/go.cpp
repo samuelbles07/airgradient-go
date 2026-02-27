@@ -1953,7 +1953,7 @@ private:
     if (s12_ != nullptr) {
       uint16_t ppm = 0;
       const esp_err_t err = s12_i2c_read_co2_ppm(s12_, &ppm);
-      if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+      if (err == ESP_OK && ppm > 0 && ppm <= 32000) {
         s12_last_valid_ = true;
         s12_last_ppm_ = ppm;
         ESP_LOGI(GO_TAG, "s12: co2=%u", (unsigned)ppm);
@@ -1966,7 +1966,7 @@ private:
       uint16_t ppm = 0;
       uint8_t e_status = 0;
       const esp_err_t err = sunrise_i2c_read_co2_ppm(sunrise_, &ppm, &e_status);
-      if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+      if (err == ESP_OK && ppm > 0 && ppm <= 32000) {
         sunlight_last_valid_ = true;
         sunlight_last_ppm_ = ppm;
         ESP_LOGI(GO_TAG, "sunlight: co2=%u", (unsigned)ppm);
@@ -2487,7 +2487,7 @@ private:
     if (s12_ != nullptr) {
       uint16_t ppm = 0;
       const esp_err_t err = s12_i2c_read_co2_ppm(s12_, &ppm);
-      if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+      if (err == ESP_OK && ppm > 0 && ppm <= 32000) {
         s12_last_valid_ = true;
         s12_last_ppm_ = ppm;
         ESP_LOGI(GO_TAG, "s12: co2=%u", (unsigned)ppm);
@@ -2500,7 +2500,7 @@ private:
       uint16_t ppm = 0;
       uint8_t e_status = 0;
       const esp_err_t err = sunrise_i2c_read_co2_ppm(sunrise_, &ppm, &e_status);
-      if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
+      if (err == ESP_OK && ppm > 0 && ppm <= 32000) {
         sunlight_last_valid_ = true;
         sunlight_last_ppm_ = ppm;
         ESP_LOGI(GO_TAG, "sunlight: co2=%u", (unsigned)ppm);
@@ -2774,6 +2774,9 @@ extern "C" void app_main(void) {
   i2c_master_bus_handle_t bus_handle = nullptr;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
 
+  // Some I2C targets need a short time after boot before responding reliably.
+  sleep_ms(50);
+
   static Scd4xTest scd4x;
   Scd4xTest *scd4x_ptr = nullptr;
   {
@@ -2800,38 +2803,56 @@ extern "C" void app_main(void) {
     }
   }
 
-  // Senseair I2C CO2 (test-only). Both S12 and Sunrise share address 0x68.
+  // Senseair I2C CO2 (test-only). Both S12 and Sunlight (Sunrise) share address 0x68.
   static s12_i2c_t s12;
   s12_i2c_t *s12_ptr = nullptr;
   static sunrise_i2c_t sunrise;
   sunrise_i2c_t *sunrise_ptr = nullptr;
   {
-    // Detect S12 by its firmware type register (0x2F == 0xC2 per S12 docs).
-    esp_err_t err = s12_i2c_create(bus_handle, S12_I2C_ADDR_DEFAULT, 100000, &s12);
-    if (err == ESP_OK) {
-      const uint8_t reg = 0x2F;
-      uint8_t fw_type = 0;
-      err = i2c_master_transmit_receive(s12.dev, &reg, 1, &fw_type, 1, 1000);
-      if (err == ESP_OK && fw_type == 0xC2) {
-        s12_ptr = &s12;
-        ESP_LOGI(GO_TAG, "S12 initialized (test-only)");
+    const esp_err_t probe = i2c_master_probe(bus_handle, 0x68, 20);
+    if (probe != ESP_OK) {
+      ESP_LOGW(GO_TAG, "Senseair I2C CO2 not detected at 0x68: %s", esp_err_to_name(probe));
+    } else {
+      // Detect S12 by its firmware type register (0x2F == 0xC2 per S12 docs).
+      esp_err_t err = s12_i2c_create(bus_handle, S12_I2C_ADDR_DEFAULT, 100000, &s12);
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "S12 init failed: %s", esp_err_to_name(err));
       } else {
-        s12_i2c_destroy(&s12);
-      }
-    }
-
-    if (s12_ptr == nullptr) {
-      err = sunrise_i2c_create(bus_handle, SUNRISE_I2C_ADDR_DEFAULT, 100000, &sunrise);
-      if (err == ESP_OK) {
-        uint16_t ppm = 0;
-        uint8_t e_status = 0;
-        err = sunrise_i2c_read_co2_ppm(&sunrise, &ppm, &e_status);
-        if (err == ESP_OK && ppm >= 250 && ppm <= 10000) {
-          sunrise_ptr = &sunrise;
-          ESP_LOGI(GO_TAG, "Sunrise initialized (test-only; BLE field name 'sunlight')");
+        const uint8_t reg = 0x2F;
+        uint8_t fw_type = 0;
+        err = i2c_master_transmit_receive(s12.dev, &reg, 1, &fw_type, 1, 1000);
+        if (err == ESP_OK && fw_type == 0xC2) {
+          s12_ptr = &s12;
+          ESP_LOGI(GO_TAG, "S12 detected (test-only)");
         } else {
-          sunrise_i2c_destroy(&sunrise);
+          if (err != ESP_OK) {
+            ESP_LOGW(GO_TAG, "S12 detect failed: %s", esp_err_to_name(err));
+          }
+          s12_i2c_destroy(&s12);
         }
+      }
+
+      if (s12_ptr == nullptr) {
+        err = sunrise_i2c_create(bus_handle, SUNRISE_I2C_ADDR_DEFAULT, 100000, &sunrise);
+        if (err != ESP_OK) {
+          ESP_LOGW(GO_TAG, "Sunlight init failed: %s", esp_err_to_name(err));
+        } else {
+          uint8_t mode = 0;
+          int period_ms = 0;
+          err = sunrise_i2c_read_config(&sunrise, &mode, &period_ms);
+          if (err == ESP_OK) {
+            sunrise_ptr = &sunrise;
+            ESP_LOGI(GO_TAG, "Sunlight detected (test-only; BLE field name 'sunlight') mode=%u period_ms=%d",
+                     (unsigned)mode, period_ms);
+          } else {
+            ESP_LOGW(GO_TAG, "Sunlight detect failed: %s", esp_err_to_name(err));
+            sunrise_i2c_destroy(&sunrise);
+          }
+        }
+      }
+
+      if (s12_ptr == nullptr && sunrise_ptr == nullptr) {
+        ESP_LOGW(GO_TAG, "Senseair I2C CO2 init failed: neither S12 nor Sunlight responded");
       }
     }
   }

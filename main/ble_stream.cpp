@@ -199,6 +199,8 @@ esp_err_t BLEStream::start(const char* device_name) {
     return ESP_FAIL;
   }
 
+  ESP_LOGI(TAG, "BLE device name: %s", device_name);
+
   // Best-effort: prefer large MTU for JSON notifications.
   (void)NimBLEDevice::setMTU(256);
 
