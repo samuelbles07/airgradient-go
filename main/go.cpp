@@ -1832,29 +1832,48 @@ private:
   // ----- Placeholder implementations (fill in later) -----
 
   void _idle_measure_and_display(void) {
+    // Keep non-PM measurements running even if PM sensor is missing.
+    PMData pm;
+    pm.pm_01 = MeasuresInvalid::PM;
+    pm.pm_25 = MeasuresInvalid::PM;
+    pm.pm_10 = MeasuresInvalid::PM;
+    pm.pm_01_sp = MeasuresInvalid::PM;
+    pm.pm_25_sp = MeasuresInvalid::PM;
+    pm.pm_10_sp = MeasuresInvalid::PM;
+    pm.pm_03_pc = MeasuresInvalid::PM;
+    pm.pm_05_pc = MeasuresInvalid::PM;
+    pm.pm_01_pc = MeasuresInvalid::PM;
+    pm.pm_25_pc = MeasuresInvalid::PM;
+    pm.pm_5_pc = MeasuresInvalid::PM;
+    pm.pm_10_pc = MeasuresInvalid::PM;
+
     if (pm_sensor_ == nullptr) {
       ESP_LOGW(GO_TAG, "PM sensor not initialized");
-      return;
-    }
-
-    PMData pm = {};
-    if (!pm_sensor_->read(pm)) {
+    } else if (!pm_sensor_->read(pm)) {
       ESP_LOGW(GO_TAG, "PM sensor read failed");
-      return;
     }
 
-    if (!pm.is_pm_25_valid()) {
-      ESP_LOGW(GO_TAG, "PM2.5 invalid");
-      return;
+    if (pm.is_pm_25_valid()) {
+      ESP_LOGI(GO_TAG, "pm25: %.1f", pm.pm_25);
     }
-    ESP_LOGI(GO_TAG, "pm25: %.1f", pm.pm_25);
-
-    ESP_LOGI(GO_TAG, "pm1.0: %.1f", pm.pm_01);
-    ESP_LOGI(GO_TAG, "pm10: %.1f", pm.pm_10);
-    ESP_LOGI(GO_TAG, "count 0.5: %.1f", pm.pm_05_pc);
-    ESP_LOGI(GO_TAG, "count 1.0: %.1f", pm.pm_01_pc);
-    ESP_LOGI(GO_TAG, "count 2.5: %.1f", pm.pm_25_pc);
-    ESP_LOGI(GO_TAG, "count 10: %.1f", pm.pm_10_pc);
+    if (pm.is_pm_01_valid()) {
+      ESP_LOGI(GO_TAG, "pm1.0: %.1f", pm.pm_01);
+    }
+    if (pm.is_pm_10_valid()) {
+      ESP_LOGI(GO_TAG, "pm10: %.1f", pm.pm_10);
+    }
+    if (pm.is_pm_05_pc_valid()) {
+      ESP_LOGI(GO_TAG, "count 0.5: %.1f", pm.pm_05_pc);
+    }
+    if (pm.is_pm_01_pc_valid()) {
+      ESP_LOGI(GO_TAG, "count 1.0: %.1f", pm.pm_01_pc);
+    }
+    if (pm.is_pm_25_pc_valid()) {
+      ESP_LOGI(GO_TAG, "count 2.5: %.1f", pm.pm_25_pc);
+    }
+    if (pm.is_pm_10_pc_valid()) {
+      ESP_LOGI(GO_TAG, "count 10: %.1f", pm.pm_10_pc);
+    }
 
     TVOCNOxData gas = {};
     bool tvoc_valid = false;
@@ -2371,22 +2390,30 @@ private:
 
   bool _tracking_step(void) {
     // TODO: measure -> save to storage -> display.
+    // Keep non-PM measurements running even if PM sensor is missing.
+    PMData pm;
+    pm.pm_01 = MeasuresInvalid::PM;
+    pm.pm_25 = MeasuresInvalid::PM;
+    pm.pm_10 = MeasuresInvalid::PM;
+    pm.pm_01_sp = MeasuresInvalid::PM;
+    pm.pm_25_sp = MeasuresInvalid::PM;
+    pm.pm_10_sp = MeasuresInvalid::PM;
+    pm.pm_03_pc = MeasuresInvalid::PM;
+    pm.pm_05_pc = MeasuresInvalid::PM;
+    pm.pm_01_pc = MeasuresInvalid::PM;
+    pm.pm_25_pc = MeasuresInvalid::PM;
+    pm.pm_5_pc = MeasuresInvalid::PM;
+    pm.pm_10_pc = MeasuresInvalid::PM;
+
     if (pm_sensor_ == nullptr) {
       ESP_LOGW(GO_TAG, "PM sensor not initialized");
-      return true;
-    }
-
-    PMData pm = {};
-    if (!pm_sensor_->read(pm)) {
+    } else if (!pm_sensor_->read(pm)) {
       ESP_LOGW(GO_TAG, "PM sensor read failed");
-      return true;
     }
 
-    if (!pm.is_pm_25_valid()) {
-      ESP_LOGW(GO_TAG, "PM2.5 invalid");
-      return true;
+    if (pm.is_pm_25_valid()) {
+      ESP_LOGI(GO_TAG, "pm25: %.1f", pm.pm_25);
     }
-    ESP_LOGI(GO_TAG, "pm25: %.1f", pm.pm_25);
 
     if (pm.is_pm_01_valid()) {
       ESP_LOGI(GO_TAG, "pm1.0: %.1f", pm.pm_01);
