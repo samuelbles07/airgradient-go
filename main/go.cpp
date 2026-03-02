@@ -559,6 +559,99 @@ static const char *vbus_status_name(drivers::VBusStatus s) {
   return "UNDEFINED";
 }
 
+static const char *charge_status_name(drivers::ChargeStatus s) {
+  switch (s) {
+  case drivers::ChargeStatus::NOT_CHARGING:
+    return "NOT_CHARGING";
+  case drivers::ChargeStatus::TRICKLE_PRECHARGE_FASTCHARGE:
+    return "PRECHARGE_OR_FAST";
+  case drivers::ChargeStatus::TAPER_CHARGE:
+    return "TAPER";
+  case drivers::ChargeStatus::TOPOFF_TIMER_ACTIVE:
+    return "TOPOFF";
+  }
+  return "UNKNOWN";
+}
+
+static void log_bq25629_debug_snapshot(drivers::BQ25629 *charger) {
+  if (charger == nullptr) {
+    return;
+  }
+
+  uint8_t reg16 = 0;
+  esp_err_t err = charger->read_register(drivers::BQ25629_REG::CHARGER_CONTROL_0, reg16);
+  if (err != ESP_OK) {
+    ESP_LOGW(GO_TAG, "BQ25629 read REG0x16 failed: %s", esp_err_to_name(err));
+    return;
+  }
+
+  uint8_t reg18 = 0;
+  err = charger->read_register(drivers::BQ25629_REG::CHARGER_CONTROL_2, reg18);
+  if (err != ESP_OK) {
+    ESP_LOGW(GO_TAG, "BQ25629 read REG0x18 failed: %s", esp_err_to_name(err));
+    return;
+  }
+
+  drivers::BQ25629_Status status = {};
+  err = charger->read_status(status);
+  if (err != ESP_OK) {
+    ESP_LOGW(GO_TAG, "BQ25629 read_status failed: %s", esp_err_to_name(err));
+    return;
+  }
+
+  drivers::BQ25629_Fault fault = {};
+  err = charger->read_fault(fault);
+  if (err != ESP_OK) {
+    ESP_LOGW(GO_TAG, "BQ25629 read_fault failed: %s", esp_err_to_name(err));
+    return;
+  }
+
+  drivers::BQ25629_ADC_Data adc = {};
+  err = charger->read_adc(adc);
+  if (err != ESP_OK) {
+    ESP_LOGW(GO_TAG, "BQ25629 read_adc failed: %s", esp_err_to_name(err));
+    return;
+  }
+
+  const bool en_chg = (reg16 & (1U << 5)) != 0;
+  const bool en_hiz = (reg16 & (1U << 4)) != 0;
+  const bool force_pmid_dis = (reg16 & (1U << 3)) != 0;
+  const bool force_ibatdis = (reg16 & (1U << 6)) != 0;
+  const bool wd_rst = (reg16 & (1U << 2)) != 0;
+  const bool en_otg = (reg18 & (1U << 6)) != 0;
+  const unsigned batfet_ctrl = (unsigned)(reg18 & 0x03U);
+
+  ESP_LOGI("app_main",
+           "BQ25629 reg - REG0x16: 0x%02X (FORCE_IBATDIS:%u EN_CHG:%u EN_HIZ:%u "
+           "FORCE_PMID_DIS:%u WD_RST:%u) "
+           "REG0x18: 0x%02X (EN_OTG:%u BATFET_CTRL:%u)",
+           (unsigned)reg16, (unsigned)force_ibatdis, (unsigned)en_chg, (unsigned)en_hiz,
+           (unsigned)force_pmid_dis, (unsigned)wd_rst, (unsigned)reg18, (unsigned)en_otg, batfet_ctrl);
+
+  ESP_LOGI("app_main",
+           "BQ25629 dbg - VBUS: %u, CHG: %u (%s), IOTG_REG: %u, VOTG_REG: %u, WD: %u",
+           (unsigned)status.vbus_status, (unsigned)status.charge_status,
+           charge_status_name(status.charge_status), (unsigned)status.iindpm_stat,
+           (unsigned)status.vindpm_stat, (unsigned)status.wd_stat);
+
+  ESP_LOGI("app_main", "BQ25629 fault - OTG: %u, TSHUT: %u, TS_STAT: %u, VBUS: %u, BAT: %u, SYS: %u",
+           (unsigned)fault.otg_fault, (unsigned)fault.tshut_fault, (unsigned)fault.ts_stat,
+           (unsigned)fault.vbus_fault, (unsigned)fault.bat_fault, (unsigned)fault.sys_fault);
+
+  ESP_LOGI("app_main",
+           "BQ25629 adc - VPMID: %u mV, VBAT: %u mV, VSYS: %u mV, VBUS: %u mV, IBAT: %d mA, IBUS: %d mA",
+           (unsigned)adc.vpmid_mv, (unsigned)adc.vbat_mv, (unsigned)adc.vsys_mv, (unsigned)adc.vbus_mv,
+           (int)adc.ibat_ma, (int)adc.ibus_ma);
+}
+
+static void log_sensor_summary_banner(void) {
+  ESP_LOGI("app_main",
+           "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81"
+           "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81 SENSOR SUMMARY "
+           "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81"
+           "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81");
+}
+
 static bool is_usb_c_adapter_present(drivers::VBusStatus s) {
   switch (s) {
   case drivers::VBusStatus::USB_SDP:
@@ -1649,6 +1742,109 @@ private:
     }
   }
 
+  void _recover_charger_charge_path_if_needed(drivers::VBusStatus vbus) {
+    if (charger_ == nullptr || !is_usb_c_adapter_present(vbus)) {
+      return;
+    }
+
+    uint8_t reg16 = 0;
+    esp_err_t err = charger_->read_register(drivers::BQ25629_REG::CHARGER_CONTROL_0, reg16);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "BQ25629 recovery: read REG0x16 failed: %s", esp_err_to_name(err));
+      return;
+    }
+
+    uint8_t reg18 = 0;
+    err = charger_->read_register(drivers::BQ25629_REG::CHARGER_CONTROL_2, reg18);
+    if (err != ESP_OK) {
+      ESP_LOGW(GO_TAG, "BQ25629 recovery: read REG0x18 failed: %s", esp_err_to_name(err));
+      return;
+    }
+
+    // Field mapping from observed behavior in logs: bit6 can force battery discharge state.
+    const bool force_ibatdis = (reg16 & (1U << 6)) != 0;
+    const bool en_chg = (reg16 & (1U << 5)) != 0;
+    const bool en_hiz = (reg16 & (1U << 4)) != 0;
+    const bool force_pmid_dis = (reg16 & (1U << 3)) != 0;
+    const bool en_otg = (reg18 & (1U << 6)) != 0;
+
+    bool changed = false;
+
+    if (force_ibatdis) {
+      const uint8_t next = (uint8_t)(reg16 & ~(1U << 6));
+      err = charger_->write_register(drivers::BQ25629_REG::CHARGER_CONTROL_0, next);
+      if (err == ESP_OK) {
+        reg16 = next;
+        changed = true;
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: cleared REG0x16 bit6 (FORCE_IBATDIS)");
+      } else {
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: clear REG0x16 bit6 failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    if (force_pmid_dis) {
+      err = charger_->enable_pmid_discharge(false);
+      if (err == ESP_OK) {
+        reg16 = (uint8_t)(reg16 & ~(1U << 3));
+        changed = true;
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: disabled FORCE_PMID_DIS");
+      } else {
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: disable FORCE_PMID_DIS failed: %s",
+                 esp_err_to_name(err));
+      }
+    }
+
+    if (en_hiz) {
+      err = charger_->disable_hiz_mode();
+      if (err == ESP_OK) {
+        reg16 = (uint8_t)(reg16 & ~(1U << 4));
+        changed = true;
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: disabled HIZ mode");
+      } else {
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: disable HIZ failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    if (!en_chg) {
+      err = charger_->enable_charging(true);
+      if (err == ESP_OK) {
+        reg16 = (uint8_t)(reg16 | (1U << 5));
+        changed = true;
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: re-enabled charging");
+      } else {
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: enable_charging(true) failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    if (en_otg) {
+      err = charger_->enable_otg(false);
+      if (err == ESP_OK) {
+        reg18 = (uint8_t)(reg18 & ~(1U << 6));
+        changed = true;
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: disabled OTG while adapter is present");
+      } else {
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: disable OTG failed: %s", esp_err_to_name(err));
+      }
+    }
+
+    if (changed) {
+      err = charger_->set_watchdog_timeout(drivers::WatchdogTimeout::Sec200);
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: set_watchdog_timeout failed: %s", esp_err_to_name(err));
+      }
+
+      err = charger_->reset_watchdog();
+      if (err != ESP_OK) {
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: reset_watchdog failed: %s", esp_err_to_name(err));
+      } else {
+        last_bq_wdt_reset_ms_ = now_ms();
+      }
+
+      ESP_LOGW(GO_TAG, "BQ25629 recovery complete: REG0x16=0x%02X REG0x18=0x%02X", (unsigned)reg16,
+               (unsigned)reg18);
+    }
+  }
+
   void _poll_usb_c_if_needed(void) {
     if (charger_ == nullptr) {
       return;
@@ -1678,6 +1874,7 @@ private:
       if (ui_ != nullptr) {
         (void)ui_->set_charging(adapter_present);
       }
+      _recover_charger_charge_path_if_needed(vbus);
       return;
     }
 
@@ -1701,6 +1898,7 @@ private:
     }
 
     last_vbus_status_ = vbus;
+    _recover_charger_charge_path_if_needed(vbus);
   }
 
   void _handle_usb_c_plugged_event(void) {
@@ -1969,6 +2167,9 @@ private:
   // ----- Placeholder implementations (fill in later) -----
 
   void _idle_measure_and_display(void) {
+    log_bq25629_debug_snapshot(charger_);
+    log_sensor_summary_banner();
+
     // Keep non-PM measurements running even if PM sensor is missing.
     PMData pm;
     pm.pm_01 = MeasuresInvalid::PM;
@@ -2527,6 +2728,9 @@ private:
 
   bool _tracking_step(void) {
     // TODO: measure -> save to storage -> display.
+    log_bq25629_debug_snapshot(charger_);
+    log_sensor_summary_banner();
+
     // Keep non-PM measurements running even if PM sensor is missing.
     PMData pm;
     pm.pm_01 = MeasuresInvalid::PM;
