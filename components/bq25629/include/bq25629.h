@@ -225,6 +225,10 @@ public:
    */
   esp_err_t deinit();
 
+  // CHARGER_CONTROL_0 (0x16) bit7 EN_AUTO_IBATDIS.
+  // When enabled, the device can automatically enable IBAT discharge.
+  esp_err_t enable_auto_ibat_discharge(bool enable);
+
   /**
    * @brief Enable battery charging
    * @param enable True to enable, false to disable

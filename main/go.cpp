@@ -617,6 +617,14 @@ static esp_err_t init_charger(i2c_master_bus_handle_t bus_handle, drivers::BQ256
     return err;
   }
 
+  // Enable EN_AUTO_IBATDIS (CHARGER_CONTROL_0 bit7) so the charger can automatically
+  // enable IBAT discharge when appropriate.
+  err = charger.enable_auto_ibat_discharge(true);
+  if (err != ESP_OK) {
+    ESP_LOGW(GO_TAG, "BQ25629 EN_AUTO_IBATDIS enable failed: %s", esp_err_to_name(err));
+    // Best-effort: keep running.
+  }
+
   err = charger.set_watchdog_timeout(drivers::WatchdogTimeout::Sec200);
   if (err != ESP_OK) {
     return err;

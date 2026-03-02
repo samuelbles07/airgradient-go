@@ -105,6 +105,7 @@ constexpr int I2C_TIMEOUT_MS = 1000;
 // Register bit masks
 namespace BIT_MASK {
 // CHARGER_CONTROL_0 (0x16)
+constexpr uint8_t EN_AUTO_IBATDIS = (1 << 7);
 constexpr uint8_t EN_CHG = (1 << 5);
 constexpr uint8_t EN_HIZ = (1 << 4);
 constexpr uint8_t FORCE_PMID_DIS = (1 << 3);
@@ -137,6 +138,16 @@ constexpr uint8_t CHG_STAT_MASK = 0x18;
 constexpr uint8_t CHG_STAT_SHIFT = 3;
 constexpr uint8_t VBUS_STAT_MASK = 0x07;
 } // namespace BIT_MASK
+
+esp_err_t BQ25629::enable_auto_ibat_discharge(bool enable) {
+  esp_err_t ret = modify_register(BQ25629_REG::CHARGER_CONTROL_0, BIT_MASK::EN_AUTO_IBATDIS,
+                                  enable ? BIT_MASK::EN_AUTO_IBATDIS : 0);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to %s EN_AUTO_IBATDIS: %s", enable ? "enable" : "disable",
+             esp_err_to_name(ret));
+  }
+  return ret;
+}
 
 BQ25629::BQ25629(i2c_master_bus_handle_t i2c_bus, uint8_t device_address)
     : i2c_bus_(i2c_bus), dev_handle_(nullptr), device_address_(device_address),
@@ -182,6 +193,10 @@ esp_err_t BQ25629::init(const BQ25629_Config &config) {
   }
 
   ESP_LOGI(TAG, "%s found, Part Info: 0x%02X", part_name, part_info);
+
+  // Best-effort: enable EN_AUTO_IBATDIS (CHARGER_CONTROL_0 bit7).
+  // Keep init running even if this fails.
+  (void)enable_auto_ibat_discharge(true);
 
   // Configure charge voltage
   ret = set_charge_voltage(config.charge_voltage_mv);
