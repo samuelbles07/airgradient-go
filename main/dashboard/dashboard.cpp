@@ -132,8 +132,14 @@ static void draw_left_str_vcentered(u8g2_t *u8g2, int x, int y, int h, const cha
 }
 
 static void format_time_hhmm(char out[6], uint8_t hour, uint8_t minute) {
-  const uint8_t hh = (uint8_t)(hour % 24U);
-  const uint8_t mm = (uint8_t)(minute % 60U);
+  // Use 0xFF as "unknown" for time.
+  if (hour >= 24U || minute >= 60U) {
+    (void)snprintf(out, 6, "--:--");
+    return;
+  }
+
+  const uint8_t hh = hour;
+  const uint8_t mm = minute;
 
   out[0] = (char)('0' + (hh / 10U));
   out[1] = (char)('0' + (hh % 10U));
@@ -381,19 +387,26 @@ void Dashboard::_render_frame(const Values &values) {
     constexpr int BATTERY_SLOT_W = 16;
     const int slot_x = SCREEN_W - header_margin_x - BATTERY_SLOT_W;
 
-    const uint16_t glyph = battery_glyph(values.is_battery_charging, values.battery_pct);
-    u8g2_SetFont(&_u8g2, u8g2_font_siji_t_6x10);
-    int glyph_w = (int)u8g2_GetGlyphWidth(&_u8g2, glyph);
-    if (glyph_w < 0) {
-      glyph_w = 0;
-    }
-    if (glyph_w > BATTERY_SLOT_W) {
-      glyph_w = BATTERY_SLOT_W;
-    }
-    const int x = slot_x + (BATTERY_SLOT_W - glyph_w) / 2;
-    draw_glyph_vcentered(&_u8g2, x, HEADER_CONTENT_Y, HEADER_CONTENT_H, glyph);
-
+    // Reserve the battery slot width even when unknown.
     header_right_bound = slot_x - header_gap_x;
+
+    // Use 0xFF as "unknown" for battery percent.
+    const bool battery_unknown = (values.battery_pct == 0xFFu);
+    if (battery_unknown && !values.is_battery_charging) {
+      // Leave slot blank.
+    } else {
+      const uint16_t glyph = battery_glyph(values.is_battery_charging, values.battery_pct);
+      u8g2_SetFont(&_u8g2, u8g2_font_siji_t_6x10);
+      int glyph_w = (int)u8g2_GetGlyphWidth(&_u8g2, glyph);
+      if (glyph_w < 0) {
+        glyph_w = 0;
+      }
+      if (glyph_w > BATTERY_SLOT_W) {
+        glyph_w = BATTERY_SLOT_W;
+      }
+      const int x = slot_x + (BATTERY_SLOT_W - glyph_w) / 2;
+      draw_glyph_vcentered(&_u8g2, x, HEADER_CONTENT_Y, HEADER_CONTENT_H, glyph);
+    }
   }
 
   // Header: status icons (top-middle).

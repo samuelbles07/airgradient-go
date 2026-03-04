@@ -1016,9 +1016,9 @@ private:
                                 MeasuresInvalid::PM,
                                 MeasuresInvalid::TEMPERATURE,
                                 (int)MeasuresInvalid::HUMIDITY,
-                                0,
-                                0,
-                                0,
+                                0xFF,
+                                0xFF,
+                                0xFF,
                                 false,
                                 0};
 
@@ -1108,7 +1108,9 @@ private:
     }
 
     _sample_battery_percent();
-    if (battery_percent_ok_) {
+    // Keep battery percent "unknown" (0xFF) until it was populated at least once
+    // by a measurement update.
+    if (battery_percent_ok_ && v.battery_pct != 0xFFu) {
       const int bp = (battery_percent_ < 0) ? 0 : ((battery_percent_ > 100) ? 100 : battery_percent_);
       v.battery_pct = (uint8_t)bp;
     }
@@ -3201,16 +3203,12 @@ extern "C" void app_main(void) {
                         MeasuresInvalid::PM,
                         MeasuresInvalid::TEMPERATURE,
                         (int)MeasuresInvalid::HUMIDITY,
-                        0,
-                        0,
-                        0,
+                        0xFF,
+                        0xFF,
+                        0xFF,
                         false,
                         0};
     if (charger_ptr != nullptr) {
-      uint8_t pct = 0;
-      if (charger_ptr->estimate_battery_percent(pct) == ESP_OK) {
-        v.battery_pct = pct;
-      }
       bool ch = false;
       if (charger_ptr->is_charging(ch) == ESP_OK) {
         v.is_battery_charging = ch;
