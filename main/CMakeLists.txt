@@ -30,6 +30,8 @@ set(srcs
     "nand_storage_service.cpp"
     "s12_i2c.c"
     "sunrise_i2c.c"
+    "dashboard/dashboard.cpp"
+    "dashboard/display_driver.cpp"
     "ui/u8g2_canvas.cpp"
     "ui/dashboard_ui.cpp"
 )

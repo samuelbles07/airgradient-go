@@ -43,6 +43,7 @@
 #include "bq25629.h"
 
 #include "gdey0213b74.h"
+#include "dashboard/dashboard.h"
 #include "ui/dashboard_ui.h"
 
 #include "PMSensor.hpp"
@@ -919,16 +920,16 @@ public:
                TVOCNOxSensor *tvoc_nox_sensor, CO2Sensor *co2_sensor, dps368_handle_t *dps368,
                Scd4xTest *scd4x, s12_i2c_t *s12, sunrise_i2c_t *sunrise,
                BLEStream *ble,
-               i2c_master_bus_handle_t i2c_bus, GPSService *gps, ui::DashboardUI *ui,
-               ssd1680x::panels::GDEY0213B74 *epd, NandStorageService *storage,
+               i2c_master_bus_handle_t i2c_bus, GPSService *gps, dashboard::Dashboard *dash,
+               NandStorageService *storage,
                drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
        : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
-         tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), scd4x_(scd4x),
-         s12_(s12), sunrise_(sunrise), ble_(ble),
-         i2c_bus_(i2c_bus), gps_(gps),
-         ui_(ui), epd_(epd),
-         storage_(storage), charger_(charger),
-         last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
+          tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), scd4x_(scd4x),
+          s12_(s12), sunrise_(sunrise), ble_(ble),
+          i2c_bus_(i2c_bus), gps_(gps),
+          dash_(dash),
+          storage_(storage), charger_(charger),
+          last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
     if (p == nullptr) {
@@ -1018,8 +1019,7 @@ private:
   BLEStream *ble_ = nullptr;
   i2c_master_bus_handle_t i2c_bus_ = nullptr;
   GPSService *gps_ = nullptr;
-  ui::DashboardUI *ui_ = nullptr;
-  ssd1680x::panels::GDEY0213B74 *epd_ = nullptr;
+  dashboard::Dashboard *dash_ = nullptr;
   NandStorageService *storage_ = nullptr;
   drivers::BQ25629 *charger_ = nullptr;
 
@@ -1046,6 +1046,8 @@ private:
 
   bool battery_percent_ok_ = false;
   int battery_percent_ = -1;
+
+  dashboard::Values dash_values_{400, 0, 0, 0, 0, 0, 0, false, 0};
 
   bool flash_avail_ok_ = false;
   uint32_t flash_avail_kb_ = 0;
@@ -1096,6 +1098,57 @@ private:
         charger_vbus_seen_, usb_c_adapter_present_,
         tracking_session_id_, tracking_sleep_interval_s_, co2_calibrating_);
     ble_->notify_status(payload);
+  }
+
+  uint8_t _dashboard_status_mask_(bool gps_ok, const GPSService::Data &gps) const {
+    uint8_t m = 0;
+    if (_state == State::Sync) {
+      m = (uint8_t)(m | dashboard::STATUS_SYNC);
+    }
+    if (_state == State::Tracking) {
+      m = (uint8_t)(m | dashboard::STATUS_TRACKING);
+    }
+    if (gps_ok && gps.fix_valid) {
+      m = (uint8_t)(m | dashboard::STATUS_GPS_FIX);
+    }
+    return m;
+  }
+
+  void _dashboard_update_status_only_(void) {
+    if (dash_ == nullptr) {
+      return;
+    }
+
+    GPSService::Data d = {};
+    bool gps_ok = false;
+    if (gps_ != nullptr) {
+      d = gps_->get();
+      gps_ok = true;
+    }
+
+    dashboard::Values v = dash_values_;
+    v.status_mask = _dashboard_status_mask_(gps_ok, d);
+
+    if (gps_ok && d.utc.time_valid) {
+      v.hour = (uint8_t)d.utc.hour;
+      v.minute = (uint8_t)d.utc.min;
+    }
+
+    _sample_battery_percent();
+    if (battery_percent_ok_) {
+      const int bp = (battery_percent_ < 0) ? 0 : ((battery_percent_ > 100) ? 100 : battery_percent_);
+      v.battery_pct = (uint8_t)bp;
+    }
+
+    if (charger_ != nullptr) {
+      bool ch = false;
+      if (charger_->is_charging(ch) == ESP_OK) {
+        v.is_battery_charging = ch;
+      }
+    }
+
+    dash_->update(v);
+    dash_values_ = v;
   }
 
   void _ble_status_notify_if_needed(void) {
@@ -1256,15 +1309,7 @@ private:
     // In dev mode we don't reboot between modes, but TRACKING deep-sleeps the panel after
     // full_refresh(). Ensure we wake and restore basemap prerequisites before switching to
     // IDLE (which uses partial refresh).
-    if (ui_ != nullptr) {
-      (void)ui_->set_tracking(false);
-      (void)ui_->set_syncing(false);
-      (void)ui_->set_gps_fixed(false);
-      const esp_err_t err = ui_->full_refresh();
-      if (err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(err));
-      }
-    }
+    _dashboard_update_status_only_();
 #endif
 
     _transition(State::Idle);
@@ -1598,19 +1643,6 @@ private:
     ESP_LOGI(GO_TAG, "clear logs: ok");
   }
 
-  void _update_battery_ui(void) {
-    if (ui_ == nullptr) {
-      return;
-    }
-
-    if (!battery_percent_ok_) {
-      (void)ui_->set_battery_percent(-1);
-      return;
-    }
-
-    (void)ui_->set_battery_percent(battery_percent_);
-  }
-
   void _step(const Inputs &in) {
     switch (_state) {
     case State::Idle:
@@ -1673,6 +1705,9 @@ private:
 
     // Best-effort immediate notify if subscribed (except SYNC which stopped BLE).
     _ble_status_notify_if_needed();
+
+    // Best-effort: keep dashboard header icons in sync with state transitions.
+    _dashboard_update_status_only_();
   }
 
   void _state_idle(const Inputs &in) {
@@ -1870,10 +1905,6 @@ private:
       last_vbus_status_ = vbus;
       ESP_LOGI(GO_TAG, "USB-C initial: %s (vbus=%s)", adapter_present ? "plugged" : "unplugged",
                vbus_status_name(vbus));
-
-      if (ui_ != nullptr) {
-        (void)ui_->set_charging(adapter_present);
-      }
       _recover_charger_charge_path_if_needed(vbus);
       return;
     }
@@ -1884,9 +1915,6 @@ private:
     }
 
     if (adapter_present != usb_c_adapter_present_) {
-      if (ui_ != nullptr) {
-        (void)ui_->set_charging(adapter_present);
-      }
       if (adapter_present) {
         ESP_LOGI(GO_TAG, "USB-C plugged");
         _handle_usb_c_plugged_event();
@@ -2028,15 +2056,7 @@ private:
       // In dev mode we don't reboot between modes, but TRACKING deep-sleeps the panel after
       // full_refresh(). Ensure we wake and restore basemap prerequisites before switching to
       // IDLE (which uses partial refresh).
-      if (ui_ != nullptr) {
-        (void)ui_->set_tracking(false);
-        (void)ui_->set_syncing(false);
-        (void)ui_->set_gps_fixed(false);
-        const esp_err_t err = ui_->full_refresh();
-        if (err != ESP_OK) {
-          ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(err));
-        }
-      }
+      _dashboard_update_status_only_();
 #endif
       _transition(State::Idle);
       return;
@@ -2109,15 +2129,10 @@ private:
       }
     }
 
-    // Clear the display and put the panel to sleep.
-    if (ui_ != nullptr) {
-      ESP_LOGI(GO_TAG, "shutdown: display clear");
-      const uint32_t t0 = now_ms();
-      const esp_err_t err = ui_->clear_and_sleep();
-      if (err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "shutdown: ui clear_and_sleep failed: %s", esp_err_to_name(err));
-      }
-      ESP_LOGI(GO_TAG, "shutdown: display clear done (%" PRIu32 "ms)", now_ms() - t0);
+    // Put the panel to sleep.
+    if (dash_ != nullptr) {
+      ESP_LOGI(GO_TAG, "shutdown: display sleep");
+      dash_->deep_sleep();
     }
     // else if (epd_ != nullptr) {
     //   ESP_LOGI(GO_TAG, "shutdown: display clear (raw)");
@@ -2224,14 +2239,6 @@ private:
         ESP_LOGI(GO_TAG, "tvoc raw: %d", gas.tvoc_raw);
         ESP_LOGI(GO_TAG, "nox raw: %d", gas.nox_raw);
 
-        if (ui_ != nullptr) {
-          if (gas.is_tvoc_raw_valid()) {
-            (void)ui_->set_tvoc((float)gas.tvoc_raw);
-          }
-          if (gas.is_nox_raw_valid()) {
-            (void)ui_->set_nox((float)gas.nox_raw);
-          }
-        }
       } else {
         ESP_LOGW(GO_TAG, "TVOC/NOx read failed");
       }
@@ -2247,23 +2254,11 @@ private:
       if (co2_sensor_->read(co2)) {
         co2_valid = co2.is_valid();
         ESP_LOGI(GO_TAG, "co2: %d", co2.co2);
-        if (ui_ != nullptr && co2.is_valid()) {
-          (void)ui_->set_co2_ppm(co2.co2);
-        }
         if (co2_sensor_->support_temp_hum()) {
           th = co2_sensor_->temp_hum_data();
           th_temp_valid = th.is_temp_valid();
           th_hum_valid = th.is_hum_valid();
           ESP_LOGI(GO_TAG, "temp: %.2f ; rhum: %.2f", th.temperature, th.humidity);
-
-          if (ui_ != nullptr) {
-            if (th_temp_valid) {
-              (void)ui_->set_temp_c(th.temperature);
-            }
-            if (th_hum_valid) {
-              (void)ui_->set_humidity_pct((int)lroundf(th.humidity));
-            }
-          }
         }
       } else {
         ESP_LOGW(GO_TAG, "CO2 read failed");
@@ -2328,9 +2323,6 @@ private:
           ESP_LOGI(GO_TAG, "dps368: t=%.2fC", dps.temperature_c);
         }
 
-        if (ui_ != nullptr && dps.pressure_valid) {
-          (void)ui_->set_pressure_hpa((int)lround(dps.pressure_pa / 100.0));
-        }
       } else if (err != ESP_ERR_NOT_FOUND) {
         ESP_LOGW(GO_TAG, "dps368 read failed: %s", esp_err_to_name(err));
       }
@@ -2346,21 +2338,42 @@ private:
 
     _sample_battery_percent();
 
-    if (ui_ != nullptr) {
-      (void)ui_->set_tracking(false);
-      (void)ui_->set_syncing(false);
-      (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
-      (void)ui_->set_pm25_ugm3(pm.pm_25);
-
-      _update_battery_ui();
+    if (dash_ != nullptr) {
+      dashboard::Values v = dash_values_;
+      v.status_mask = _dashboard_status_mask_(gps_ok, d);
 
       if (gps_ok && d.utc.time_valid) {
-        (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
+        v.hour = (uint8_t)d.utc.hour;
+        v.minute = (uint8_t)d.utc.min;
       }
-      const esp_err_t ui_err = ui_->refresh();
-      if (ui_err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
+
+      if (pm.is_pm_25_valid()) {
+        v.pm25_ugm3 = (int)lroundf(pm.pm_25);
       }
+
+      if (co2_valid) {
+        v.co2_ppm = co2.co2;
+      }
+      if (th_temp_valid) {
+        v.temperature_c = (int)lroundf(th.temperature);
+      }
+      if (th_hum_valid) {
+        v.humidity_pct = (int)lroundf(th.humidity);
+      }
+
+      if (battery_percent_ok_) {
+        const int bp = (battery_percent_ < 0) ? 0 : ((battery_percent_ > 100) ? 100 : battery_percent_);
+        v.battery_pct = (uint8_t)bp;
+      }
+      if (charger_ != nullptr) {
+        bool ch = false;
+        if (charger_->is_charging(ch) == ESP_OK) {
+          v.is_battery_charging = ch;
+        }
+      }
+
+      dash_->update(v);
+      dash_values_ = v;
     }
 
     if (ble_ != nullptr && ble_->is_running() && (ble_->measures_subscribed() || ble_->status_subscribed())) {
@@ -2439,11 +2452,8 @@ private:
 
   void _inactive_enter_deep_sleep(void) {
     // TODO: configure wakeup source (physical button) and enter deep sleep.
-    if (epd_ != nullptr) {
-      const esp_err_t err = epd_->deep_sleep();
-      if (err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "epd deep_sleep failed: %s", esp_err_to_name(err));
-      }
+    if (dash_ != nullptr) {
+      dash_->deep_sleep();
     }
 
     ESP_LOGI(GO_TAG, "inactive: entering deep sleep (stub)");
@@ -2466,20 +2476,7 @@ private:
   void _sync_begin(void) {
     ESP_LOGI(GO_TAG, "sync: begin");
 
-    if (ui_ != nullptr) {
-      (void)ui_->set_tracking(false);
-      (void)ui_->set_syncing(true);
-      bool gf = false;
-      if (gps_ != nullptr) {
-        const GPSService::Data d = gps_->get();
-        gf = d.fix_valid;
-      }
-      (void)ui_->set_gps_fixed(gf);
-      const esp_err_t ui_err = ui_->refresh();
-      if (ui_err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
-      }
-    }
+    _dashboard_update_status_only_();
 
     _sync_wifi_connected = wifi_connect(_serial_number);
     if (!_sync_wifi_connected) {
@@ -2710,15 +2707,7 @@ private:
       _sync_wifi_connected = false;
     }
 
-    if (ui_ != nullptr) {
-      (void)ui_->set_syncing(false);
-      (void)ui_->set_tracking(false);
-      // (void)ui_->set_gps_fixed(false);
-      const esp_err_t ui_err = ui_->refresh();
-      if (ui_err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
-      }
-    }
+    _dashboard_update_status_only_();
   }
 
   void _tracking_begin(void) {
@@ -2878,58 +2867,47 @@ private:
 
     _sample_battery_percent();
 
-    if (ui_ != nullptr) {
-      (void)ui_->set_tracking(true);
-      (void)ui_->set_syncing(false);
-      (void)ui_->set_gps_fixed(gps_ok && d.fix_valid);
-      (void)ui_->set_pm25_ugm3(pm.pm_25);
-
-      if (co2_valid) {
-        (void)ui_->set_co2_ppm(co2.co2);
-        if (th_temp_valid) {
-          (void)ui_->set_temp_c(th.temperature);
-        }
-        if (th_hum_valid) {
-          (void)ui_->set_humidity_pct((int)lroundf(th.humidity));
-        }
-      }
-
-      if (tvoc_valid) {
-        (void)ui_->set_tvoc((float)gas.tvoc_raw);
-      }
-      if (nox_valid) {
-        (void)ui_->set_nox((float)gas.nox_raw);
-      }
-
-      if (pressure_valid) {
-        (void)ui_->set_pressure_hpa((int)lround(dps.pressure_pa / 100.0));
-      }
-
-      _update_battery_ui();
+    if (dash_ != nullptr) {
+      dashboard::Values v = dash_values_;
+      v.status_mask = _dashboard_status_mask_(gps_ok, d);
 
       if (gps_ok && d.utc.time_valid) {
-        (void)ui_->set_time_hm(d.utc.hour, d.utc.min);
+        v.hour = (uint8_t)d.utc.hour;
+        v.minute = (uint8_t)d.utc.min;
       }
 
-#if TRACKING_DISPLAY_SLEEP == 1
-      const esp_err_t ui_err = ui_->full_refresh();
-      if (ui_err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "ui full_refresh failed: %s", esp_err_to_name(ui_err));
+      if (pm.is_pm_25_valid()) {
+        v.pm25_ugm3 = (int)lroundf(pm.pm_25);
       }
-#else
-      const esp_err_t ui_err = ui_->refresh();
-      if (ui_err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "ui refresh failed: %s", esp_err_to_name(ui_err));
+
+      if (co2_valid) {
+        v.co2_ppm = co2.co2;
       }
-#endif
+      if (th_temp_valid) {
+        v.temperature_c = (int)lroundf(th.temperature);
+      }
+      if (th_hum_valid) {
+        v.humidity_pct = (int)lroundf(th.humidity);
+      }
+
+      if (battery_percent_ok_) {
+        const int bp = (battery_percent_ < 0) ? 0 : ((battery_percent_ > 100) ? 100 : battery_percent_);
+        v.battery_pct = (uint8_t)bp;
+      }
+      if (charger_ != nullptr) {
+        bool ch = false;
+        if (charger_->is_charging(ch) == ESP_OK) {
+          v.is_battery_charging = ch;
+        }
+      }
+
+      dash_->update(v);
+      dash_values_ = v;
     }
 
 #if TRACKING_DISPLAY_SLEEP == 1
-    if (epd_ != nullptr) {
-      const esp_err_t err = epd_->deep_sleep();
-      if (err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "epd deep_sleep failed: %s", esp_err_to_name(err));
-      }
+    if (dash_ != nullptr) {
+      dash_->deep_sleep();
     }
 #endif
 
@@ -3247,14 +3225,37 @@ extern "C" void app_main(void) {
   buscfg.max_transfer_sz = GO_SPI_MAX_TRANSFER_SZ;
   ESP_ERROR_CHECK(spi_bus_initialize(GO_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-  ui::DashboardUI *ui_ptr = nullptr;
-  ssd1680x::panels::GDEY0213B74 *epd_ptr = nullptr;
+  dashboard::Dashboard *dash_ptr = nullptr;
   {
-    const esp_err_t err = init_display(&ui_ptr, &epd_ptr);
+    constexpr dashboard::display_driver::Config display_cfg{
+        GO_SPI_HOST,
+        GO_EPD_CLOCK_SPEED_HZ,
+        0,
+        GO_EPD_CS_GPIO,
+        GO_EPD_DC_GPIO,
+        GO_EPD_RST_GPIO,
+        GO_EPD_BUSY_GPIO,
+    };
+    static dashboard::Dashboard dash(dashboard::Config{20, display_cfg});
+
+    dashboard::Values v{400, 0, 0, 0, 0, 0, 0, false, 0};
+    if (charger_ptr != nullptr) {
+      uint8_t pct = 0;
+      if (charger_ptr->estimate_battery_percent(pct) == ESP_OK) {
+        v.battery_pct = pct;
+      }
+      bool ch = false;
+      if (charger_ptr->is_charging(ch) == ESP_OK) {
+        v.is_battery_charging = ch;
+      }
+    }
+
+    const esp_err_t err = dash.init(v);
     if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "display init failed: %s", esp_err_to_name(err));
-      ui_ptr = nullptr;
-      epd_ptr = nullptr;
+      ESP_LOGW(GO_TAG, "dashboard init failed: %s", esp_err_to_name(err));
+      dash_ptr = nullptr;
+    } else {
+      dash_ptr = &dash;
     }
   }
 
@@ -3352,7 +3353,8 @@ extern "C" void app_main(void) {
 
   static BLEStream ble;
   GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, co2_sensor_ptr,
-                  dps368_ptr, scd4x_ptr, s12_ptr, sunrise_ptr, &ble, bus_handle, gps_ptr, ui_ptr, epd_ptr, storage_ptr,
+                  dps368_ptr, scd4x_ptr, s12_ptr, sunrise_ptr, &ble, bus_handle, gps_ptr, dash_ptr,
+                  storage_ptr,
                   charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
