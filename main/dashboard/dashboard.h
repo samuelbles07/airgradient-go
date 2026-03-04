@@ -15,8 +15,8 @@ inline constexpr uint8_t STATUS_TRACKING = 1U << 2;
 
 struct Values {
   int co2_ppm;
-  int pm25_ugm3;
-  int temperature_c;
+  float pm25_ugm3;
+  float temperature_c;
   int humidity_pct;
 
   uint8_t hour;
@@ -44,6 +44,10 @@ public:
   // Assumes values always change; updates via partial or full.
   // Blocking: yes (waits for EPD BUSY)
   void update(const Values &values);
+
+  // Clears the screen (white) using a full update.
+  // Blocking: yes (waits for EPD BUSY)
+  void clear();
 
   void deep_sleep();
 

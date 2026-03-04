@@ -1012,7 +1012,7 @@ private:
   bool battery_percent_ok_ = false;
   int battery_percent_ = -1;
 
-  dashboard::Values dash_values_{400, 0, 0, 0, 0, 0, 0, false, 0};
+  dashboard::Values dash_values_{400, 0.0f, 0.0f, 0, 0, 0, 0, false, 0};
 
   bool flash_avail_ok_ = false;
   uint32_t flash_avail_kb_ = 0;
@@ -2096,6 +2096,11 @@ private:
 
     // Put the panel to sleep.
     if (dash_ != nullptr) {
+      ESP_LOGI(GO_TAG, "shutdown: display clear");
+      const uint32_t t0 = now_ms();
+      dash_->clear();
+      ESP_LOGI(GO_TAG, "shutdown: display clear done (%" PRIu32 "ms)", now_ms() - t0);
+
       ESP_LOGI(GO_TAG, "shutdown: display sleep");
       dash_->deep_sleep();
     }
@@ -2294,14 +2299,14 @@ private:
       }
 
       if (pm.is_pm_25_valid()) {
-        v.pm25_ugm3 = (int)lroundf(pm.pm_25);
+        v.pm25_ugm3 = pm.pm_25;
       }
 
       if (co2_valid) {
         v.co2_ppm = co2.co2;
       }
       if (th_temp_valid) {
-        v.temperature_c = (int)lroundf(th.temperature);
+        v.temperature_c = th.temperature;
       }
       if (th_hum_valid) {
         v.humidity_pct = (int)lroundf(th.humidity);
@@ -2823,14 +2828,14 @@ private:
       }
 
       if (pm.is_pm_25_valid()) {
-        v.pm25_ugm3 = (int)lroundf(pm.pm_25);
+        v.pm25_ugm3 = pm.pm_25;
       }
 
       if (co2_valid) {
         v.co2_ppm = co2.co2;
       }
       if (th_temp_valid) {
-        v.temperature_c = (int)lroundf(th.temperature);
+        v.temperature_c = th.temperature;
       }
       if (th_hum_valid) {
         v.humidity_pct = (int)lroundf(th.humidity);
@@ -3184,7 +3189,7 @@ extern "C" void app_main(void) {
     };
     static dashboard::Dashboard dash(dashboard::Config{20, display_cfg});
 
-    dashboard::Values v{400, 0, 0, 0, 0, 0, 0, false, 0};
+    dashboard::Values v{400, 0.0f, 0.0f, 0, 0, 0, 0, false, 0};
     if (charger_ptr != nullptr) {
       uint8_t pct = 0;
       if (charger_ptr->estimate_battery_percent(pct) == ESP_OK) {

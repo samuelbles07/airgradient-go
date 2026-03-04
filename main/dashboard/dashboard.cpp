@@ -1,5 +1,6 @@
 #include "dashboard/dashboard.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -138,6 +139,15 @@ static void format_time_hhmm(char out[6], uint8_t hour, uint8_t minute) {
   out[3] = (char)('0' + (mm / 10U));
   out[4] = (char)('0' + (mm % 10U));
   out[5] = '\0';
+}
+
+static void format_1dp(char *out, size_t out_size, float value) {
+  const int value_x10 = (int)lroundf(value * 10.0f);
+  const bool neg = (value_x10 < 0);
+  const unsigned int abs_x10 = (unsigned int)(neg ? -value_x10 : value_x10);
+  const unsigned int ip = abs_x10 / 10U;
+  const unsigned int fp = abs_x10 % 10U;
+  (void)snprintf(out, out_size, "%s%u.%01u", neg ? "-" : "", ip, fp);
 }
 
 static void draw_glyph_vcentered(u8g2_t *u8g2, int x, int y, int h, uint16_t encoding) {
@@ -300,6 +310,15 @@ void Dashboard::update(const Values &values) {
   }
 }
 
+void Dashboard::clear() {
+  if (!_is_inited) {
+    return;
+  }
+
+  memset(_buf, 0xFF, sizeof(_buf));
+  _update_full();
+}
+
 bool Dashboard::_is_header_changed(const Values &next) const {
   if ((_values.hour != next.hour) || (_values.minute != next.minute)) {
     return true;
@@ -428,15 +447,15 @@ void Dashboard::_render_frame(const Values &values) {
   draw_centered_label_with_unit(&_u8g2, BORDER, PM_LABEL_Y, SCREEN_W - 2 * BORDER, PM_LABEL_H,
                                 u8g2_font_logisoso18_tf, "PM2.5", u8g2_font_helvR12_tf, "(ug/m3)");
   char pm_buf[8];
-  snprintf(pm_buf, sizeof(pm_buf), "%d", values.pm25_ugm3);
-  u8g2_SetFont(&_u8g2, u8g2_font_logisoso38_tn);
+  format_1dp(pm_buf, sizeof(pm_buf), values.pm25_ugm3);
+  u8g2_SetFont(&_u8g2, u8g2_font_logisoso38_tf);
   draw_centered_str(&_u8g2, BORDER, PM_VALUE_Y, SCREEN_W - 2 * BORDER, PM_VALUE_H, pm_buf);
 
   // Footer: temperature.
   char temp_buf[8];
-  snprintf(temp_buf, sizeof(temp_buf), "%d", values.temperature_c);
+  format_1dp(temp_buf, sizeof(temp_buf), values.temperature_c);
   {
-    u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tn);
+    u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tf);
     const int value_w = (int)u8g2_GetStrWidth(&_u8g2, temp_buf);
 
     u8g2_SetFont(&_u8g2, u8g2_font_helvR14_tf);
@@ -455,7 +474,7 @@ void Dashboard::_render_frame(const Values &values) {
     const int label_x = FOOTER_LEFT_CELL_X + (FOOTER_CELL_W - label_w) / 2;
     u8g2_DrawStr(&_u8g2, (u8g2_uint_t)label_x, (u8g2_uint_t)FOOTER_LABEL_BASELINE_Y, "Temp");
 
-    u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tn);
+    u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tf);
     u8g2_DrawStr(&_u8g2, (u8g2_uint_t)group_x, (u8g2_uint_t)FOOTER_BASELINE_Y, temp_buf);
 
     u8g2_SetFont(&_u8g2, u8g2_font_helvR14_tf);
