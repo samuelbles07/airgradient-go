@@ -37,6 +37,7 @@ static constexpr int FOOTER_CELL_GAP_X = 12;
 static constexpr int FOOTER_CELL_W = (SCREEN_W - 2 * FOOTER_MARGIN_X - FOOTER_CELL_GAP_X) / 2;
 static constexpr int FOOTER_LEFT_CELL_X = FOOTER_MARGIN_X;
 static constexpr int FOOTER_RIGHT_CELL_X = FOOTER_MARGIN_X + FOOTER_CELL_W + FOOTER_CELL_GAP_X;
+static constexpr int FOOTER_HUM_SHIFT_X = 8;
 
 static constexpr int HEADER_BAR_X = 8;
 static constexpr int HEADER_BAR_W = 112;
@@ -527,11 +528,11 @@ void Dashboard::_render_frame(const Values &values) {
     const int unit_w = (int)u8g2_GetStrWidth(&_u8g2, "%");
 
     const int group_w = value_w + 4 + unit_w;
-    const int group_x = FOOTER_RIGHT_CELL_X + (FOOTER_CELL_W - group_w) / 2;
+    const int group_x = FOOTER_RIGHT_CELL_X + (FOOTER_CELL_W - group_w) / 2 + FOOTER_HUM_SHIFT_X;
 
     u8g2_SetFont(&_u8g2, u8g2_font_helvB08_tf);
     const int label_w = (int)u8g2_GetStrWidth(&_u8g2, "Hum");
-    const int label_x = FOOTER_RIGHT_CELL_X + (FOOTER_CELL_W - label_w) / 2;
+    const int label_x = FOOTER_RIGHT_CELL_X + (FOOTER_CELL_W - label_w) / 2 + FOOTER_HUM_SHIFT_X;
     u8g2_DrawStr(&_u8g2, (u8g2_uint_t)label_x, (u8g2_uint_t)FOOTER_LABEL_BASELINE_Y, "Hum");
 
     u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tf);
