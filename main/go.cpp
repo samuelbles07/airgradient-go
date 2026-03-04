@@ -123,6 +123,29 @@ static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1
 
 static inline void sleep_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
+static void utc_to_local_hm(int utc_hour,
+                            int utc_minute,
+                            int tz_offset_hours,
+                            uint8_t *out_hour,
+                            uint8_t *out_minute) {
+  if (out_hour == nullptr || out_minute == nullptr) {
+    return;
+  }
+  if (utc_hour < 0 || utc_hour > 23 || utc_minute < 0 || utc_minute > 59) {
+    *out_hour = 0xFF;
+    *out_minute = 0xFF;
+    return;
+  }
+
+  int h = utc_hour + tz_offset_hours;
+  h %= 24;
+  if (h < 0) {
+    h += 24;
+  }
+  *out_hour = (uint8_t)h;
+  *out_minute = (uint8_t)utc_minute;
+}
+
 static esp_err_t init_ext_watchdog(void) {
   gpio_config_t io_conf = {};
   io_conf.intr_type = GPIO_INTR_DISABLE;
@@ -1103,8 +1126,7 @@ private:
     v.status_mask = _dashboard_status_mask_(gps_ok, d);
 
     if (gps_ok && d.utc.time_valid) {
-      v.hour = (uint8_t)d.utc.hour;
-      v.minute = (uint8_t)d.utc.min;
+      utc_to_local_hm(d.utc.hour, d.utc.min, 7, &v.hour, &v.minute);
     }
 
     _sample_battery_percent();
@@ -2304,8 +2326,7 @@ private:
       v.status_mask = _dashboard_status_mask_(gps_ok, d);
 
       if (gps_ok && d.utc.time_valid) {
-        v.hour = (uint8_t)d.utc.hour;
-        v.minute = (uint8_t)d.utc.min;
+        utc_to_local_hm(d.utc.hour, d.utc.min, 7, &v.hour, &v.minute);
       }
 
       if (pm.is_pm_25_valid()) {
@@ -2833,8 +2854,7 @@ private:
       v.status_mask = _dashboard_status_mask_(gps_ok, d);
 
       if (gps_ok && d.utc.time_valid) {
-        v.hour = (uint8_t)d.utc.hour;
-        v.minute = (uint8_t)d.utc.min;
+        utc_to_local_hm(d.utc.hour, d.utc.min, 7, &v.hour, &v.minute);
       }
 
       if (pm.is_pm_25_valid()) {
