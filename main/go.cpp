@@ -42,9 +42,7 @@
 #include "WiFiManager.h"
 #include "bq25629.h"
 
-#include "gdey0213b74.h"
 #include "dashboard/dashboard.h"
-#include "ui/dashboard_ui.h"
 
 #include "PMSensor.hpp"
 #include "SPS30Sensor.hpp"
@@ -764,39 +762,6 @@ static void log_gps_data(const GPSService::Data &d) {
     ESP_LOGI(GO_TAG, "gps: fix=0 q=%d sats=%d time=%s last_sentence=%" PRIu64 "ms", d.fix_quality,
              d.satellites, time_buf, d.last_sentence_ms);
   }
-}
-
-static esp_err_t init_display(ui::DashboardUI **ui_out, ssd1680x::panels::GDEY0213B74 **epd_out) {
-  if (ui_out == nullptr || epd_out == nullptr) {
-    return ESP_ERR_INVALID_ARG;
-  }
-  *ui_out = nullptr;
-  *epd_out = nullptr;
-
-  ssd1680x::Config cfg;
-  cfg.host = GO_SPI_HOST;
-  cfg.mirror_x = true;
-  cfg.pins.busy = GO_EPD_BUSY_GPIO;
-  cfg.pins.rst = GO_EPD_RST_GPIO;
-  cfg.pins.dc = GO_EPD_DC_GPIO;
-  cfg.pins.cs = GO_EPD_CS_GPIO;
-
-  cfg.devcfg.clock_speed_hz = GO_EPD_CLOCK_SPEED_HZ;
-  cfg.devcfg.mode = GO_EPD_SPI_MODE;
-  cfg.devcfg.queue_size = GO_EPD_SPI_QUEUE_SIZE;
-  cfg.devcfg.flags = GO_EPD_SPI_DEVICE_FLAGS;
-
-  static ssd1680x::panels::GDEY0213B74 epd(cfg);
-  static ui::DashboardUI ui(epd);
-
-  esp_err_t err = ui.init();
-  if (err != ESP_OK) {
-    return err;
-  }
-
-  *ui_out = &ui;
-  *epd_out = &epd;
-  return ESP_OK;
 }
 
 static std::string buildSerialNumber() {
@@ -2134,25 +2099,6 @@ private:
       ESP_LOGI(GO_TAG, "shutdown: display sleep");
       dash_->deep_sleep();
     }
-    // else if (epd_ != nullptr) {
-    //   ESP_LOGI(GO_TAG, "shutdown: display clear (raw)");
-    //   const uint32_t t0 = now_ms();
-    //   esp_err_t err = epd_->ensure_init_full();
-    //   if (err != ESP_OK) {
-    //     ESP_LOGW(GO_TAG, "shutdown: epd ensure_init_full failed: %s", esp_err_to_name(err));
-    //   } else {
-    //     err = epd_->clear_white();
-    //     if (err != ESP_OK) {
-    //       ESP_LOGW(GO_TAG, "shutdown: epd clear_white failed: %s", esp_err_to_name(err));
-    //     }
-    //     sleep_ms(4000);
-    //     err = epd_->deep_sleep();
-    //     if (err != ESP_OK) {
-    //       ESP_LOGW(GO_TAG, "shutdown: epd deep_sleep failed: %s", esp_err_to_name(err));
-    //     }
-    //   }
-    //   ESP_LOGI(GO_TAG, "shutdown: display clear done (%" PRIu32 "ms)", now_ms() - t0);
-    // }
 
     // Cut PM sensor rail.
     (void)gpio_set_level(GO_PM_POWER_GPIO, 0);

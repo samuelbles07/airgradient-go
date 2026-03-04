@@ -1,7 +1,6 @@
 # Maybe don't directly include "driver" instead "esp_driver_i2c" etc
 set (
     components
-    edp-ssd1680x
     driver
     u8g2
     PMSensor
@@ -32,8 +31,6 @@ set(srcs
     "sunrise_i2c.c"
     "dashboard/dashboard.cpp"
     "dashboard/display_driver.cpp"
-    "ui/u8g2_canvas.cpp"
-    "ui/dashboard_ui.cpp"
 )
 
 idf_component_register(
