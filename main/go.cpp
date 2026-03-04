@@ -1012,7 +1012,15 @@ private:
   bool battery_percent_ok_ = false;
   int battery_percent_ = -1;
 
-  dashboard::Values dash_values_{400, 0.0f, 0.0f, 0, 0, 0, 0, false, 0};
+  dashboard::Values dash_values_{MeasuresInvalid::CO2,
+                                MeasuresInvalid::PM,
+                                MeasuresInvalid::TEMPERATURE,
+                                (int)MeasuresInvalid::HUMIDITY,
+                                0,
+                                0,
+                                0,
+                                false,
+                                0};
 
   bool flash_avail_ok_ = false;
   uint32_t flash_avail_kb_ = 0;
@@ -3189,7 +3197,15 @@ extern "C" void app_main(void) {
     };
     static dashboard::Dashboard dash(dashboard::Config{20, display_cfg});
 
-    dashboard::Values v{400, 0.0f, 0.0f, 0, 0, 0, 0, false, 0};
+    dashboard::Values v{MeasuresInvalid::CO2,
+                        MeasuresInvalid::PM,
+                        MeasuresInvalid::TEMPERATURE,
+                        (int)MeasuresInvalid::HUMIDITY,
+                        0,
+                        0,
+                        0,
+                        false,
+                        0};
     if (charger_ptr != nullptr) {
       uint8_t pct = 0;
       if (charger_ptr->estimate_battery_percent(pct) == ESP_OK) {

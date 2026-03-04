@@ -6,6 +6,8 @@
 
 #include <esp_log.h>
 
+#include "MeasuresTypes.h"
+
 #include "dashboard/u8x8_c_api.h"
 
 namespace dashboard {
@@ -439,21 +441,33 @@ void Dashboard::_render_frame(const Values &values) {
   draw_centered_label_with_unit(&_u8g2, BORDER, CO2_LABEL_Y, SCREEN_W - 2 * BORDER, CO2_LABEL_H,
                                 u8g2_font_logisoso18_tf, "CO2", u8g2_font_helvR12_tf, "(ppm)");
   char co2_buf[8];
-  snprintf(co2_buf, sizeof(co2_buf), "%d", values.co2_ppm);
-  u8g2_SetFont(&_u8g2, u8g2_font_logisoso38_tn);
+  if (values.co2_ppm == MeasuresInvalid::CO2) {
+    (void)snprintf(co2_buf, sizeof(co2_buf), "-");
+  } else {
+    (void)snprintf(co2_buf, sizeof(co2_buf), "%d", values.co2_ppm);
+  }
+  u8g2_SetFont(&_u8g2, u8g2_font_logisoso38_tf);
   draw_centered_str(&_u8g2, BORDER, CO2_VALUE_Y, SCREEN_W - 2 * BORDER, CO2_VALUE_H, co2_buf);
 
   // PM2.5 label and value.
   draw_centered_label_with_unit(&_u8g2, BORDER, PM_LABEL_Y, SCREEN_W - 2 * BORDER, PM_LABEL_H,
                                 u8g2_font_logisoso18_tf, "PM2.5", u8g2_font_helvR12_tf, "(ug/m3)");
   char pm_buf[8];
-  format_1dp(pm_buf, sizeof(pm_buf), values.pm25_ugm3);
+  if (values.pm25_ugm3 == MeasuresInvalid::PM) {
+    (void)snprintf(pm_buf, sizeof(pm_buf), "-");
+  } else {
+    format_1dp(pm_buf, sizeof(pm_buf), values.pm25_ugm3);
+  }
   u8g2_SetFont(&_u8g2, u8g2_font_logisoso38_tf);
   draw_centered_str(&_u8g2, BORDER, PM_VALUE_Y, SCREEN_W - 2 * BORDER, PM_VALUE_H, pm_buf);
 
   // Footer: temperature.
   char temp_buf[8];
-  format_1dp(temp_buf, sizeof(temp_buf), values.temperature_c);
+  if (values.temperature_c == MeasuresInvalid::TEMPERATURE) {
+    (void)snprintf(temp_buf, sizeof(temp_buf), "-");
+  } else {
+    format_1dp(temp_buf, sizeof(temp_buf), values.temperature_c);
+  }
   {
     u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tf);
     const int value_w = (int)u8g2_GetStrWidth(&_u8g2, temp_buf);
@@ -487,9 +501,13 @@ void Dashboard::_render_frame(const Values &values) {
 
   // Footer: humidity.
   char hum_buf[8];
-  snprintf(hum_buf, sizeof(hum_buf), "%d", values.humidity_pct);
+  if (values.humidity_pct == (int)MeasuresInvalid::HUMIDITY) {
+    (void)snprintf(hum_buf, sizeof(hum_buf), "-");
+  } else {
+    (void)snprintf(hum_buf, sizeof(hum_buf), "%d", values.humidity_pct);
+  }
   {
-    u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tn);
+    u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tf);
     const int value_w = (int)u8g2_GetStrWidth(&_u8g2, hum_buf);
 
     u8g2_SetFont(&_u8g2, u8g2_font_helvR14_tf);
@@ -503,7 +521,7 @@ void Dashboard::_render_frame(const Values &values) {
     const int label_x = FOOTER_RIGHT_CELL_X + (FOOTER_CELL_W - label_w) / 2;
     u8g2_DrawStr(&_u8g2, (u8g2_uint_t)label_x, (u8g2_uint_t)FOOTER_LABEL_BASELINE_Y, "Hum");
 
-    u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tn);
+    u8g2_SetFont(&_u8g2, u8g2_font_helvB14_tf);
     u8g2_DrawStr(&_u8g2, (u8g2_uint_t)group_x, (u8g2_uint_t)FOOTER_BASELINE_Y, hum_buf);
 
     u8g2_SetFont(&_u8g2, u8g2_font_helvR14_tf);
