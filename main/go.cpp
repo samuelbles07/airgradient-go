@@ -2689,6 +2689,17 @@ private:
       _sync_wifi_connected = false;
     }
 
+    // SPS30 can get into a bad I2C state after long Wi-Fi operations.
+    // Best-effort: reinitialize only if it fails a read.
+    bool pm_ok = false;
+    if (pm_sensor_ != nullptr) {
+      PMData pm;
+      pm_ok = pm_sensor_->read(pm);
+    }
+    if (!pm_ok) {
+      _reinit_pm_sensor("sync end");
+    }
+
     _dashboard_update_status_only_();
   }
 
