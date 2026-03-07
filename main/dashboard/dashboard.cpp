@@ -218,12 +218,15 @@ static StatusIcon status_icon_for_bit(uint8_t bit) {
   case STATUS_SYNC:
     // Open Iconic Arrow: 0057
     return StatusIcon{u8g2_font_open_iconic_arrow_2x_t, 0x0057};
+  case STATUS_BLE_CONNECTED:
+    // Render "B" using the same font as the timestamp.
+    return StatusIcon{u8g2_font_helvB10_tf, (uint16_t)'B'};
   default:
     return StatusIcon{nullptr, 0};
   }
 }
 
-static uint8_t status_icons(uint8_t mask, StatusIcon out[3]) {
+static uint8_t status_icons(uint8_t mask, StatusIcon out[4]) {
   uint8_t count = 0;
   auto add = [&](uint8_t bit) {
     if ((mask & bit) == 0) {
@@ -237,10 +240,11 @@ static uint8_t status_icons(uint8_t mask, StatusIcon out[3]) {
     out[count++] = icon;
   };
 
-  // Priority order: sync, GPS fix, tracking.
+  // Priority order: sync, GPS fix, tracking, BLE connected.
   add(STATUS_SYNC);
   add(STATUS_GPS_FIX);
   add(STATUS_TRACKING);
+  add(STATUS_BLE_CONNECTED);
   return count;
 }
 
@@ -413,7 +417,7 @@ void Dashboard::_render_frame(const Values &values) {
 
   // Header: status icons (top-middle).
   {
-    StatusIcon icons[3] = {};
+    StatusIcon icons[4] = {};
     const int icon_count = (int)status_icons(values.status_mask, icons);
     if (icon_count <= 0) {
       // Nothing to draw.

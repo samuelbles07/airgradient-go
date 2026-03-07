@@ -107,6 +107,11 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
   explicit BLEStreamServerCallbacks(BLEStream* s) : s_(s) {}
 
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+    if (s_ != nullptr) {
+      s_->connected_.store(true, std::memory_order_relaxed);
+      s_->pending_conn_change_.store(true, std::memory_order_relaxed);
+    }
+
     const uint16_t itvl = connInfo.getConnInterval();
     const uint16_t to = connInfo.getConnTimeout();
 
@@ -161,6 +166,11 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
     (void)pServer;
     (void)connInfo;
     (void)reason;
+
+    if (s_ != nullptr) {
+      s_->connected_.store(false, std::memory_order_relaxed);
+      s_->pending_conn_change_.store(true, std::memory_order_relaxed);
+    }
 
     if (s_ == nullptr) {
       return;
@@ -333,6 +343,9 @@ esp_err_t BLEStream::start(const char* device_name) {
   status_subscribed_.store(false);
   history_subscribed_.store(false);
 
+  connected_.store(false);
+  pending_conn_change_.store(false);
+
   pending_history_start_.store(false);
   pending_tracking_.store(false);
   pending_flash_erase_.store(false);
@@ -451,6 +464,9 @@ void BLEStream::stop() {
   status_subscribed_.store(false);
   history_subscribed_.store(false);
 
+  connected_.store(false);
+  pending_conn_change_.store(false);
+
   pending_history_start_.store(false);
   pending_tracking_.store(false);
   pending_flash_erase_.store(false);
@@ -481,6 +497,18 @@ void BLEStream::stop() {
   status_notify_suppress_until_ms_ = 0;
   restart_due_to_notify_.store(false, std::memory_order_relaxed);
   ESP_LOGI(TAG, "stopped");
+}
+
+bool BLEStream::take_connection_changed(bool* out_connected) {
+  if (out_connected == nullptr) {
+    return false;
+  }
+  const bool had = pending_conn_change_.exchange(false, std::memory_order_relaxed);
+  if (!had) {
+    return false;
+  }
+  *out_connected = connected_.load(std::memory_order_relaxed);
+  return true;
 }
 
 void BLEStream::tick(uint32_t now_ms) {

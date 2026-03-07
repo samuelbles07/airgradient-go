@@ -12,6 +12,7 @@ namespace dashboard {
 inline constexpr uint8_t STATUS_SYNC = 1U << 0;
 inline constexpr uint8_t STATUS_GPS_FIX = 1U << 1;
 inline constexpr uint8_t STATUS_TRACKING = 1U << 2;
+inline constexpr uint8_t STATUS_BLE_CONNECTED = 1U << 3;
 
 struct Values {
   int co2_ppm;

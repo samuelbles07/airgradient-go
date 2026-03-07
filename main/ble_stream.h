@@ -38,6 +38,9 @@ class BLEStream {
 
   bool is_running() const { return running_.load(); }
 
+  bool is_connected() const { return connected_.load(); }
+  bool take_connection_changed(bool* out_connected);
+
   bool measures_subscribed() const { return measures_subscribed_.load(); }
   bool status_subscribed() const { return status_subscribed_.load(); }
   bool history_subscribed() const { return history_subscribed_.load(); }
@@ -69,6 +72,8 @@ class BLEStream {
   bool ble_restart_window_should_esp_restart_(uint32_t now_ms, const char* reason);
 
   std::atomic<bool> running_{false};
+  std::atomic<bool> connected_{false};
+  std::atomic<bool> pending_conn_change_{false};
   std::atomic<bool> measures_subscribed_{false};
   std::atomic<bool> status_subscribed_{false};
   std::atomic<bool> history_subscribed_{false};

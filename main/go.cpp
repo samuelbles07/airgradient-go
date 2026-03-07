@@ -991,6 +991,13 @@ public:
       _step(inputs);
       _ble_status_notify_if_needed();
       if (ble_ != nullptr) {
+        bool connected = false;
+        if (ble_->take_connection_changed(&connected)) {
+          (void)connected;
+          _dashboard_update_status_only_();
+        }
+      }
+      if (ble_ != nullptr) {
         ble_->tick(now_ms());
       }
       sleep_ms(GO_MAIN_LOOP_DELAY_MS);
@@ -1109,6 +1116,9 @@ private:
     }
     if (gps_ok && gps.fix_valid) {
       m = (uint8_t)(m | dashboard::STATUS_GPS_FIX);
+    }
+    if (ble_ != nullptr && ble_->is_connected()) {
+      m = (uint8_t)(m | dashboard::STATUS_BLE_CONNECTED);
     }
     return m;
   }
