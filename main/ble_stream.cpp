@@ -58,6 +58,42 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
  public:
   explicit BLEStreamServerCallbacks(BLEStream* s) : s_(s) {}
 
+  void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+    const uint16_t itvl = connInfo.getConnInterval();
+    const uint16_t to = connInfo.getConnTimeout();
+
+    printf("Interval: %d\n", (int)connInfo.getConnInterval());
+    printf("Latency: %d\n", (int)connInfo.getConnLatency());
+    printf("Timeout: %d\n", (int)connInfo.getConnTimeout());
+    printf("Interval_us: %" PRIu32 "\n", (uint32_t)itvl * 1250U);
+    printf("Timeout_ms: %" PRIu32 "\n", (uint32_t)to * 10U);
+
+    if (pServer != nullptr) {
+      // Request faster connection params for notification throughput.
+      // Units: interval in 1.25ms, timeout in 10ms.
+      static constexpr uint16_t MIN_ITVL = 12;   // 15ms
+      static constexpr uint16_t MAX_ITVL = 24;   // 30ms
+      static constexpr uint16_t LATENCY = 0;
+      // Keep the currently negotiated supervision timeout (iOS may ignore changes).
+      const uint16_t TIMEOUT = to;
+      printf("Requested minInterval=%u maxInterval=%u latency=%u timeout=%u\n",
+             (unsigned)MIN_ITVL, (unsigned)MAX_ITVL, (unsigned)LATENCY, (unsigned)TIMEOUT);
+      pServer->updateConnParams(connInfo.getConnHandle(), MIN_ITVL, MAX_ITVL, LATENCY, TIMEOUT);
+    }
+  }
+
+  void onConnParamsUpdate(NimBLEConnInfo& connInfo) override {
+    const uint16_t itvl = connInfo.getConnInterval();
+    const uint16_t lat = connInfo.getConnLatency();
+    const uint16_t to = connInfo.getConnTimeout();
+
+    printf("ConnParamsUpdate Interval: %u\n", (unsigned)itvl);
+    printf("ConnParamsUpdate Latency: %u\n", (unsigned)lat);
+    printf("ConnParamsUpdate Timeout: %u\n", (unsigned)to);
+    printf("ConnParamsUpdate Interval_us: %" PRIu32 "\n", (uint32_t)itvl * 1250U);
+    printf("ConnParamsUpdate Timeout_ms: %" PRIu32 "\n", (uint32_t)to * 10U);
+  }
+
   void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
     (void)pServer;
     (void)connInfo;
