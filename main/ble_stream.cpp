@@ -3,6 +3,7 @@
 #include "ble_stream.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 
 // esp-nimble-cpp
 #include "NimBLEDevice.h"
@@ -25,6 +26,10 @@ static constexpr const char* HISTORY_CHAR_UUID = "d1c0c0a4-6b48-4b2a-9b1d-59f9f2
 
 static constexpr uint32_t TRACKING_SLEEP_MIN_S = 1;
 static constexpr uint32_t TRACKING_SLEEP_MAX_S = 86400;
+
+static inline uint32_t ble_now_ms_(void) {
+  return (uint32_t)(esp_timer_get_time() / 1000);
+}
 
 static bool start_advertising_checked_(const char* ctx) {
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -95,6 +100,17 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
       pServer->updateConnParams(connInfo.getConnHandle(), MIN_ITVL, MAX_ITVL, LATENCY, TIMEOUT);
     }
 
+    // Reset notify failure supervisor state for the new connection.
+    if (s_ != nullptr) {
+      s_->measures_notify_fail_streak_ = 0;
+      s_->status_notify_fail_streak_ = 0;
+      s_->measures_notify_cooldowns_left_ = 0;
+      s_->status_notify_cooldowns_left_ = 0;
+      s_->measures_notify_suppress_until_ms_ = 0;
+      s_->status_notify_suppress_until_ms_ = 0;
+      s_->restart_due_to_notify_.store(false, std::memory_order_relaxed);
+    }
+
     // Enforce single connection for stability: stop advertising once connected.
     const bool adv_stopped = NimBLEDevice::stopAdvertising();
     ESP_LOGI(TAG, "advertising stop(connect): ok=%d", (int)adv_stopped);
@@ -126,6 +142,16 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
 
     // Belt-and-suspenders: ensure advertising restarts.
     (void)start_advertising_checked_("disconnect");
+
+    if (s_ != nullptr) {
+      s_->measures_notify_fail_streak_ = 0;
+      s_->status_notify_fail_streak_ = 0;
+      s_->measures_notify_cooldowns_left_ = 0;
+      s_->status_notify_cooldowns_left_ = 0;
+      s_->measures_notify_suppress_until_ms_ = 0;
+      s_->status_notify_suppress_until_ms_ = 0;
+      s_->restart_due_to_notify_.store(false, std::memory_order_relaxed);
+    }
   }
 
  private:
@@ -287,6 +313,15 @@ esp_err_t BLEStream::start(const char* device_name) {
   adv_restart_fail_streak_ = 0;
   last_adv_restart_ms_ = 0;
 
+  // Reset notify failure supervisor state.
+  measures_notify_fail_streak_ = 0;
+  status_notify_fail_streak_ = 0;
+  measures_notify_cooldowns_left_ = 0;
+  status_notify_cooldowns_left_ = 0;
+  measures_notify_suppress_until_ms_ = 0;
+  status_notify_suppress_until_ms_ = 0;
+  restart_due_to_notify_.store(false, std::memory_order_relaxed);
+
   if (!NimBLEDevice::init(std::string(device_name))) {
     ESP_LOGW(TAG, "NimBLEDevice::init failed");
     return ESP_FAIL;
@@ -409,11 +444,38 @@ void BLEStream::stop() {
   config_char_ = nullptr;
   history_char_ = nullptr;
   running_.store(false);
+  measures_notify_fail_streak_ = 0;
+  status_notify_fail_streak_ = 0;
+  measures_notify_cooldowns_left_ = 0;
+  status_notify_cooldowns_left_ = 0;
+  measures_notify_suppress_until_ms_ = 0;
+  status_notify_suppress_until_ms_ = 0;
+  restart_due_to_notify_.store(false, std::memory_order_relaxed);
   ESP_LOGI(TAG, "stopped");
 }
 
 void BLEStream::tick(uint32_t now_ms) {
   if (!running_.load()) {
+    return;
+  }
+
+  // Notify escalation: restart BLE stack (rate-limited).
+  if (restart_due_to_notify_.load(std::memory_order_relaxed)) {
+    static constexpr uint32_t BLE_RESTART_BACKOFF_MS = 60000;
+    if (last_ble_restart_ms_ == 0 || (now_ms - last_ble_restart_ms_) >= BLE_RESTART_BACKOFF_MS) {
+      last_ble_restart_ms_ = now_ms;
+      if (ble_restart_attempts_ < 255) {
+        ble_restart_attempts_++;
+      }
+      if (last_device_name_.empty()) {
+        last_device_name_.assign("AirGradientGo");
+      }
+
+      ESP_LOGW(TAG, "notify: restarting BLE stack attempt=%u", (unsigned)ble_restart_attempts_);
+      restart_due_to_notify_.store(false, std::memory_order_relaxed);
+      stop();
+      (void)start(last_device_name_.c_str());
+    }
     return;
   }
 
@@ -560,10 +622,56 @@ void BLEStream::notify_measures(const std::string& json) {
   if (json.empty()) {
     return;
   }
+
+  if (restart_due_to_notify_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  if (server_ == nullptr || server_->getConnectedCount() == 0) {
+    return;
+  }
+
+  static constexpr uint32_t COOLDOWN_MS = 20000;
+  static constexpr uint8_t FAIL_STREAK_TRIGGER = 3;
+  static constexpr uint8_t COOLDOWN_CYCLES = 3;
+
+  const uint32_t now = ble_now_ms_();
+  if (measures_notify_suppress_until_ms_ != 0 && (int32_t)(now - measures_notify_suppress_until_ms_) < 0) {
+    return;
+  }
+
   const bool ok = measures_char_->notify((const uint8_t*)json.data(), json.size());
   if (!ok) {
-    ESP_LOGW(TAG, "measures notify failed (len=%u)", (unsigned)json.size());
+    if (measures_notify_cooldowns_left_ > 0) {
+      measures_notify_cooldowns_left_--;
+      if (measures_notify_cooldowns_left_ == 0) {
+        ESP_LOGW(TAG, "measures notify failed after cooldowns; requesting BLE restart");
+        restart_due_to_notify_.store(true, std::memory_order_relaxed);
+      } else {
+        measures_notify_suppress_until_ms_ = now + COOLDOWN_MS;
+        ESP_LOGW(TAG, "measures notify still failing; cooldown %ums cycles_left=%u", (unsigned)COOLDOWN_MS,
+                 (unsigned)measures_notify_cooldowns_left_);
+      }
+      return;
+    }
+
+    if (measures_notify_fail_streak_ < 255) {
+      measures_notify_fail_streak_++;
+    }
+    if (measures_notify_fail_streak_ >= FAIL_STREAK_TRIGGER) {
+      measures_notify_fail_streak_ = 0;
+      measures_notify_cooldowns_left_ = COOLDOWN_CYCLES;
+      measures_notify_suppress_until_ms_ = now + COOLDOWN_MS;
+      ESP_LOGW(TAG, "measures notify failed %u times; cooldown %ums cycles=%u", (unsigned)FAIL_STREAK_TRIGGER,
+               (unsigned)COOLDOWN_MS, (unsigned)COOLDOWN_CYCLES);
+    } else if (measures_notify_fail_streak_ == 1) {
+      ESP_LOGW(TAG, "measures notify failed (len=%u)", (unsigned)json.size());
+    }
+    return;
   }
+
+  measures_notify_fail_streak_ = 0;
+  measures_notify_cooldowns_left_ = 0;
+  measures_notify_suppress_until_ms_ = 0;
 }
 
 void BLEStream::notify_status(const std::string& json) {
@@ -573,10 +681,56 @@ void BLEStream::notify_status(const std::string& json) {
   if (json.empty()) {
     return;
   }
+
+  if (restart_due_to_notify_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  if (server_ == nullptr || server_->getConnectedCount() == 0) {
+    return;
+  }
+
+  static constexpr uint32_t COOLDOWN_MS = 20000;
+  static constexpr uint8_t FAIL_STREAK_TRIGGER = 3;
+  static constexpr uint8_t COOLDOWN_CYCLES = 3;
+
+  const uint32_t now = ble_now_ms_();
+  if (status_notify_suppress_until_ms_ != 0 && (int32_t)(now - status_notify_suppress_until_ms_) < 0) {
+    return;
+  }
+
   const bool ok = status_char_->notify((const uint8_t*)json.data(), json.size());
   if (!ok) {
-    ESP_LOGW(TAG, "status notify failed (len=%u)", (unsigned)json.size());
+    if (status_notify_cooldowns_left_ > 0) {
+      status_notify_cooldowns_left_--;
+      if (status_notify_cooldowns_left_ == 0) {
+        ESP_LOGW(TAG, "status notify failed after cooldowns; requesting BLE restart");
+        restart_due_to_notify_.store(true, std::memory_order_relaxed);
+      } else {
+        status_notify_suppress_until_ms_ = now + COOLDOWN_MS;
+        ESP_LOGW(TAG, "status notify still failing; cooldown %ums cycles_left=%u", (unsigned)COOLDOWN_MS,
+                 (unsigned)status_notify_cooldowns_left_);
+      }
+      return;
+    }
+
+    if (status_notify_fail_streak_ < 255) {
+      status_notify_fail_streak_++;
+    }
+    if (status_notify_fail_streak_ >= FAIL_STREAK_TRIGGER) {
+      status_notify_fail_streak_ = 0;
+      status_notify_cooldowns_left_ = COOLDOWN_CYCLES;
+      status_notify_suppress_until_ms_ = now + COOLDOWN_MS;
+      ESP_LOGW(TAG, "status notify failed %u times; cooldown %ums cycles=%u", (unsigned)FAIL_STREAK_TRIGGER,
+               (unsigned)COOLDOWN_MS, (unsigned)COOLDOWN_CYCLES);
+    } else if (status_notify_fail_streak_ == 1) {
+      ESP_LOGW(TAG, "status notify failed (len=%u)", (unsigned)json.size());
+    }
+    return;
   }
+
+  status_notify_fail_streak_ = 0;
+  status_notify_cooldowns_left_ = 0;
+  status_notify_suppress_until_ms_ = 0;
 }
 
 bool BLEStream::notify_history(const std::string& json) {

@@ -98,6 +98,15 @@ class BLEStream {
   uint8_t ble_restart_attempts_ = 0;
   uint32_t last_ble_restart_ms_ = 0;
 
+  // Notify failure supervisor (measures + status only).
+  uint8_t measures_notify_fail_streak_ = 0;
+  uint8_t status_notify_fail_streak_ = 0;
+  uint8_t measures_notify_cooldowns_left_ = 0;
+  uint8_t status_notify_cooldowns_left_ = 0;
+  uint32_t measures_notify_suppress_until_ms_ = 0;
+  uint32_t status_notify_suppress_until_ms_ = 0;
+  std::atomic<bool> restart_due_to_notify_{false};
+
   BLEStreamCharCallbacks* measures_cb_ = nullptr;
   BLEStreamCharCallbacks* status_cb_ = nullptr;
 
