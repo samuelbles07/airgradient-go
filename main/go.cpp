@@ -990,6 +990,9 @@ public:
       Inputs inputs = _poll_inputs();
       _step(inputs);
       _ble_status_notify_if_needed();
+      if (ble_ != nullptr) {
+        ble_->tick(now_ms());
+      }
       sleep_ms(GO_MAIN_LOOP_DELAY_MS);
     }
   }

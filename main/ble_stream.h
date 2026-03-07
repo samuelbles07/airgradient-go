@@ -33,6 +33,9 @@ class BLEStream {
   esp_err_t start(const char* device_name);
   void stop();
 
+  // BLE liveness supervisor; call periodically from main loop.
+  void tick(uint32_t now_ms);
+
   bool is_running() const { return running_.load(); }
 
   bool measures_subscribed() const { return measures_subscribed_.load(); }
@@ -87,6 +90,13 @@ class BLEStream {
   NimBLECharacteristic* status_char_ = nullptr;
   NimBLECharacteristic* config_char_ = nullptr;
   NimBLECharacteristic* history_char_ = nullptr;
+
+  std::string last_device_name_;
+  uint32_t last_health_check_ms_ = 0;
+  uint8_t adv_restart_fail_streak_ = 0;
+  uint32_t last_adv_restart_ms_ = 0;
+  uint8_t ble_restart_attempts_ = 0;
+  uint32_t last_ble_restart_ms_ = 0;
 
   BLEStreamCharCallbacks* measures_cb_ = nullptr;
   BLEStreamCharCallbacks* status_cb_ = nullptr;

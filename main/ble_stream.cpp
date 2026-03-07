@@ -26,6 +26,20 @@ static constexpr const char* HISTORY_CHAR_UUID = "d1c0c0a4-6b48-4b2a-9b1d-59f9f2
 static constexpr uint32_t TRACKING_SLEEP_MIN_S = 1;
 static constexpr uint32_t TRACKING_SLEEP_MAX_S = 86400;
 
+static bool start_advertising_checked_(const char* ctx) {
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  if (adv == nullptr) {
+    ESP_LOGW(TAG, "advertising start(%s) failed: getAdvertising=null", (ctx != nullptr) ? ctx : "");
+    return false;
+  }
+
+  const bool ok = adv->start();
+  const bool active = adv->isAdvertising();
+  ESP_LOGI(TAG, "advertising start(%s): ok=%d active=%d", (ctx != nullptr) ? ctx : "", (int)ok,
+           (int)active);
+  return ok && active;
+}
+
 class BLEStreamCharCallbacks : public NimBLECharacteristicCallbacks {
  public:
   enum class Kind { Measures, Status };
@@ -80,6 +94,10 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
              (unsigned)MIN_ITVL, (unsigned)MAX_ITVL, (unsigned)LATENCY, (unsigned)TIMEOUT);
       pServer->updateConnParams(connInfo.getConnHandle(), MIN_ITVL, MAX_ITVL, LATENCY, TIMEOUT);
     }
+
+    // Enforce single connection for stability: stop advertising once connected.
+    const bool adv_stopped = NimBLEDevice::stopAdvertising();
+    ESP_LOGI(TAG, "advertising stop(connect): ok=%d", (int)adv_stopped);
   }
 
   void onConnParamsUpdate(NimBLEConnInfo& connInfo) override {
@@ -107,7 +125,7 @@ class BLEStreamServerCallbacks : public NimBLEServerCallbacks {
     s_->set_history_subscribed_(false);
 
     // Belt-and-suspenders: ensure advertising restarts.
-    (void)NimBLEDevice::startAdvertising();
+    (void)start_advertising_checked_("disconnect");
   }
 
  private:
@@ -254,6 +272,8 @@ esp_err_t BLEStream::start(const char* device_name) {
     device_name = "AirGradientGo";
   }
 
+  last_device_name_.assign(device_name);
+
   measures_subscribed_.store(false);
   status_subscribed_.store(false);
   history_subscribed_.store(false);
@@ -261,6 +281,11 @@ esp_err_t BLEStream::start(const char* device_name) {
   pending_history_start_.store(false);
   pending_tracking_.store(false);
   pending_flash_erase_.store(false);
+
+  // Reset advertising health state for this session.
+  last_health_check_ms_ = 0;
+  adv_restart_fail_streak_ = 0;
+  last_adv_restart_ms_ = 0;
 
   if (!NimBLEDevice::init(std::string(device_name))) {
     ESP_LOGW(TAG, "NimBLEDevice::init failed");
@@ -341,7 +366,7 @@ esp_err_t BLEStream::start(const char* device_name) {
     adv->addServiceUUID(SERVICE_UUID);
     adv->enableScanResponse(true);
     (void)adv->setName(std::string(device_name));
-    adv->start();
+    (void)start_advertising_checked_("start");
   } else {
     ESP_LOGW(TAG, "getAdvertising returned null");
   }
@@ -385,6 +410,79 @@ void BLEStream::stop() {
   history_char_ = nullptr;
   running_.store(false);
   ESP_LOGI(TAG, "stopped");
+}
+
+void BLEStream::tick(uint32_t now_ms) {
+  if (!running_.load()) {
+    return;
+  }
+
+  static constexpr uint32_t HEALTH_INTERVAL_MS = 10000;
+  if (last_health_check_ms_ != 0 && (now_ms - last_health_check_ms_) < HEALTH_INTERVAL_MS) {
+    return;
+  }
+  last_health_check_ms_ = now_ms;
+
+  bool need_restart = false;
+
+  if (!NimBLEDevice::isInitialized() || server_ == nullptr) {
+    ESP_LOGW(TAG, "health: NimBLE not initialized or server null");
+    need_restart = true;
+  } else {
+    const uint8_t connected = server_->getConnectedCount();
+    if (connected != 0) {
+      // Connected: advertising should already be stopped for stability.
+      return;
+    }
+
+    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+    if (adv == nullptr) {
+      ESP_LOGW(TAG, "health: getAdvertising null");
+      need_restart = true;
+    } else if (adv->isAdvertising()) {
+      adv_restart_fail_streak_ = 0;
+      return;
+    } else {
+      // Not connected and not advertising: attempt restart with backoff.
+      static constexpr uint32_t ADV_RESTART_BACKOFF_MS = 5000;
+      if (last_adv_restart_ms_ == 0 || (now_ms - last_adv_restart_ms_) >= ADV_RESTART_BACKOFF_MS) {
+        last_adv_restart_ms_ = now_ms;
+
+        const bool ok = start_advertising_checked_("health");
+        if (ok) {
+          adv_restart_fail_streak_ = 0;
+          return;
+        }
+      }
+
+      if (adv_restart_fail_streak_ < 255) {
+        adv_restart_fail_streak_++;
+      }
+      ESP_LOGW(TAG, "health: advertising restart failed streak=%u", (unsigned)adv_restart_fail_streak_);
+      need_restart = (adv_restart_fail_streak_ >= 3);
+    }
+  }
+
+  if (!need_restart) {
+    return;
+  }
+
+  static constexpr uint32_t BLE_RESTART_BACKOFF_MS = 60000;
+  if (last_ble_restart_ms_ != 0 && (now_ms - last_ble_restart_ms_) < BLE_RESTART_BACKOFF_MS) {
+    return;
+  }
+  last_ble_restart_ms_ = now_ms;
+  if (ble_restart_attempts_ < 255) {
+    ble_restart_attempts_++;
+  }
+
+  if (last_device_name_.empty()) {
+    last_device_name_.assign("AirGradientGo");
+  }
+
+  ESP_LOGW(TAG, "health: restarting BLE stack attempt=%u", (unsigned)ble_restart_attempts_);
+  stop();
+  (void)start(last_device_name_.c_str());
 }
 
 void BLEStream::request_tracking_sleep_interval_s_(uint32_t s) {
