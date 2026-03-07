@@ -66,6 +66,8 @@ class BLEStream {
   void request_flash_erase_();
   void request_history_start_();
 
+  bool ble_restart_window_should_esp_restart_(uint32_t now_ms, const char* reason);
+
   std::atomic<bool> running_{false};
   std::atomic<bool> measures_subscribed_{false};
   std::atomic<bool> status_subscribed_{false};
@@ -106,6 +108,10 @@ class BLEStream {
   uint32_t measures_notify_suppress_until_ms_ = 0;
   uint32_t status_notify_suppress_until_ms_ = 0;
   std::atomic<bool> restart_due_to_notify_{false};
+
+  // Whole-chip restart escalation: if BLE stack restarts keep happening.
+  uint32_t ble_restart_window_start_ms_ = 0;
+  uint8_t ble_restart_window_count_ = 0;
 
   BLEStreamCharCallbacks* measures_cb_ = nullptr;
   BLEStreamCharCallbacks* status_cb_ = nullptr;

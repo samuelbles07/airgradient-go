@@ -3,12 +3,15 @@
 #include "ble_stream.h"
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 
 // esp-nimble-cpp
 #include "NimBLEDevice.h"
 
 #include "cJSON.h"
+#include "freertos/idf_additions.h"
+#include "freertos/projdefs.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -29,6 +32,32 @@ static constexpr uint32_t TRACKING_SLEEP_MAX_S = 86400;
 
 static inline uint32_t ble_now_ms_(void) {
   return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+bool BLEStream::ble_restart_window_should_esp_restart_(uint32_t now_ms, const char* reason) {
+  static constexpr uint32_t WINDOW_MS = 30U * 60U * 1000U;
+
+  if (ble_restart_window_start_ms_ == 0 || (now_ms - ble_restart_window_start_ms_) > WINDOW_MS) {
+    ble_restart_window_start_ms_ = now_ms;
+    ble_restart_window_count_ = 0;
+  }
+
+  if (ble_restart_window_count_ < 255) {
+    ble_restart_window_count_++;
+  }
+
+  ESP_LOGW(TAG, "ble restart window: count=%u window_ms=%" PRIu32 " reason=%s",
+           (unsigned)ble_restart_window_count_, (uint32_t)(now_ms - ble_restart_window_start_ms_),
+           (reason != nullptr) ? reason : "");
+
+  if (ble_restart_window_count_ >= 3) {
+    ESP_LOGE(TAG, "ble restart window exceeded; esp_restart now");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    return true;
+  }
+
+  return false;
 }
 
 static bool start_advertising_checked_(const char* ctx) {
@@ -473,6 +502,8 @@ void BLEStream::tick(uint32_t now_ms) {
 
       ESP_LOGW(TAG, "notify: restarting BLE stack attempt=%u", (unsigned)ble_restart_attempts_);
       restart_due_to_notify_.store(false, std::memory_order_relaxed);
+
+      (void)ble_restart_window_should_esp_restart_(now_ms, "notify");
       stop();
       (void)start(last_device_name_.c_str());
     }
@@ -543,6 +574,7 @@ void BLEStream::tick(uint32_t now_ms) {
   }
 
   ESP_LOGW(TAG, "health: restarting BLE stack attempt=%u", (unsigned)ble_restart_attempts_);
+  (void)ble_restart_window_should_esp_restart_(now_ms, "health");
   stop();
   (void)start(last_device_name_.c_str());
 }
