@@ -475,7 +475,12 @@ void ButtonService::_handle_cap1203_irq() {
   }
 
   uint8_t mask = 0;
-  if (cap1203_.readSensorInputStatus(&mask) != ESP_OK) {
+  const esp_err_t err = cap1203_.readSensorInputStatus(&mask);
+  if (err != ESP_OK) {
+    // Best-effort: clear the CAP1203 latch so ALERT# does not remain asserted
+    // (otherwise we can get stuck in an IRQ storm).
+    ESP_LOGW(TAG, "CAP1203 read status failed (%s); clearing interrupt", esp_err_to_name(err));
+    (void)cap1203_.clearInterrupt();
     return;
   }
   mask &= 0x07;
