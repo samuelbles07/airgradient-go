@@ -2347,7 +2347,10 @@ private:
         v.pm25_ugm3 = pm.pm_25;
       }
 
-      if (co2_valid) {
+      // Display CO2 from SCD4x when initialized
+      if (scd4x_ != nullptr && scd4x_->initialized) {
+        v.co2_ppm = scd4x_last_valid_ ? (int)scd4x_last_ppm_ : MeasuresInvalid::CO2;
+      } else if (co2_valid) {
         v.co2_ppm = co2.co2;
       }
       if (th_temp_valid) {
@@ -2886,7 +2889,10 @@ private:
         v.pm25_ugm3 = pm.pm_25;
       }
 
-      if (co2_valid) {
+      // Display CO2 from SCD4x when initialized
+      if (scd4x_ != nullptr && scd4x_->initialized) {
+        v.co2_ppm = scd4x_last_valid_ ? (int)scd4x_last_ppm_ : MeasuresInvalid::CO2;
+      } else if (co2_valid) {
         v.co2_ppm = co2.co2;
       }
       if (th_temp_valid) {
