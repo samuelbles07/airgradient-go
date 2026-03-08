@@ -1729,10 +1729,11 @@ private:
       _transition(State::Tracking);
       return;
     }
-    if (in.touch_enter_long) {
-      _transition(State::Sync);
-      return;
-    }
+    // NOTE: touch_enter_long intentionally ignored (SYNC temporarily disabled from touch).
+    // if (in.touch_enter_long) {
+    //   _transition(State::Sync);
+    //   return;
+    // }
     if (in.boot_long) {
       _clear_tracking_logs();
       return;
