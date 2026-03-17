@@ -164,13 +164,13 @@ extern "C" void app_main(void) {
   bcfg.qon_active_low = true;
   bcfg.boot_active_low = true;
   bcfg.debounce_ms = 200;
-  bcfg.long_press_ms = 2500;
+  bcfg.long_press_ms = 2000;
   ButtonService buttonService(bus_handle, bcfg);
   buttonService.init();
   esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, nullptr);
 
-      // Init GPS
-      GPSService::Config gpsConfig;
+  // Init GPS
+  GPSService::Config gpsConfig;
   gpsConfig.uart_num = UART_GPS_PORT;
   gpsConfig.rx_pin = UART_GPS_RX;
   gpsConfig.tx_pin = UART_GPS_TX;

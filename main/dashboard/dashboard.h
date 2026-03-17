@@ -1,32 +1,91 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <esp_err.h>
 
+#include "MeasuresTypes.h"
 #include "dashboard/display_driver.h"
 #include "dashboard/u8g2_c_api.h"
 
 namespace dashboard {
 
-inline constexpr uint8_t STATUS_SYNC = 1U << 0;
-inline constexpr uint8_t STATUS_GPS_FIX = 1U << 1;
-inline constexpr uint8_t STATUS_TRACKING = 1U << 2;
-inline constexpr uint8_t STATUS_BLE_CONNECTED = 1U << 3;
+enum class Screen : uint8_t {
+  Home = 0,
+  MainMenu,
+  Settings,
+  SettingsChoice,
+  TagList,
+  About,
+  Confirm,
+  Shutdown,
+};
+
+enum class Metric : uint8_t {
+  None = 0,
+  Pm25,
+  Co2,
+  Temp,
+  Humidity,
+  Tvoc,
+  Nox,
+};
+
+static constexpr size_t MAX_LIST_ROWS = 9;
+
+struct ListRow {
+  const char *text = nullptr;
+  bool disabled = false;
+};
 
 struct Values {
-  int co2_ppm;
-  float pm25_ugm3;
-  float temperature_c;
-  int humidity_pct;
+  int co2_ppm = MeasuresInvalid::CO2;
+  float pm25_ugm3 = MeasuresInvalid::PM;
+  float temperature_c = MeasuresInvalid::TEMPERATURE;
+  float humidity_pct = MeasuresInvalid::HUMIDITY;
+  float tvoc_raw = (float)MeasuresInvalid::TVOC;
+  float nox_raw = (float)MeasuresInvalid::NOX;
+  float pressure_hpa = -1.0f;
+  float altitude_m = -1.0f;
 
-  uint8_t hour;
-  uint8_t minute;
+  uint8_t hour = 0xFF;
+  uint8_t minute = 0xFF;
 
-  uint8_t battery_pct;
-  bool is_battery_charging;
+  uint8_t battery_pct = 0xFF;
+  bool is_battery_charging = false;
 
-  uint8_t status_mask;
+  bool locked = false;
+  bool ble_enabled = true;
+  bool ble_connected = false;
+  bool wifi_enabled = true;
+  bool gps_enabled = true;
+  bool gps_fix = false;
+  bool tracking_active = false;
+  bool sync_active = false;
+  bool display_off = false;
+  bool use_fahrenheit = false;
+  bool pm_use_usaqi = false;
+
+  Screen screen = Screen::Home;
+  Metric active_metric = Metric::None;
+
+  ListRow rows[MAX_LIST_ROWS] = {};
+  uint8_t row_count = 0;
+  uint8_t selected_row = 0;
+  bool show_separator_after_back = false;
+
+  const char *about_title = nullptr;
+  const char *about_firmware = nullptr;
+  const char *about_serial = nullptr;
+  const char *about_hardware = nullptr;
+
+  const float *chart_samples = nullptr;
+  uint8_t chart_count = 0;
+  float chart_min = 0.0f;
+  float chart_max = 0.0f;
+
+  const char *snackbar_text = nullptr;
 };
 
 struct Config {
@@ -36,7 +95,7 @@ struct Config {
 
 class Dashboard {
 public:
-  static constexpr int REGION_MAX_H = 96;
+  static constexpr int REGION_MAX_H = 230;
 
   explicit Dashboard(Config cfg);
 

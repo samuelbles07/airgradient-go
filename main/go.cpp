@@ -28,6 +28,10 @@
 #include "cJSON.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/projdefs.h"
 #include "freertos/queue.h"
@@ -101,6 +105,9 @@ struct Inputs {
   bool button_short = false;
   bool button_long = false;
   bool boot_long = false;
+  bool touch_right_short = false;
+  bool touch_left_short = false;
+  bool touch_enter_short = false;
   bool touch_right_long = false;
   bool touch_left_long = false;
   bool touch_enter_long = false;
@@ -110,9 +117,12 @@ enum class GoInputEventType : uint8_t {
   ButtonShort = 1,
   ButtonLong = 2,
   BootLong = 3,
-  TouchRightLong = 4,
-  TouchLeftLong = 5,
-  TouchEnterLong = 6,
+  TouchRightShort = 4,
+  TouchLeftShort = 5,
+  TouchEnterShort = 6,
+  TouchRightLong = 7,
+  TouchLeftLong = 8,
+  TouchEnterLong = 9,
 };
 
 struct GoInputEvent {
@@ -123,10 +133,256 @@ static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1
 
 static inline void sleep_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
-static void utc_to_local_hm(int utc_hour,
-                            int utc_minute,
-                            int tz_offset_hours,
-                            uint8_t *out_hour,
+enum class UnitsMode : uint8_t {
+  Celsius = 0,
+  Fahrenheit = 1,
+};
+
+enum class PmDisplayMode : uint8_t {
+  Ugm3 = 0,
+  Usaqi = 1,
+};
+
+enum class IntervalSetting : uint8_t {
+  OneSecond = 0,
+  TenSeconds,
+  ThirtySeconds,
+  SixtySeconds,
+  FiveMinutes,
+  FifteenMinutes,
+  OneHour,
+  Off,
+};
+
+enum class GpsModeSetting : uint8_t {
+  AlwaysOff = 0,
+  OnWhenTracking,
+  AlwaysOn,
+};
+
+enum class DeviceModeSetting : uint8_t {
+  Stationary = 0,
+  Portable,
+  Offline,
+};
+
+enum class AutoLockSetting : uint8_t {
+  Off = 0,
+  TenSeconds = 10,
+  ThirtySeconds = 30,
+  SixtySeconds = 60,
+};
+
+enum class SettingChoiceKind : uint8_t {
+  None = 0,
+  Units,
+  PmDisplay,
+  DisplayInterval,
+  PmInterval,
+  OtherSensorInterval,
+  GpsMode,
+  Mode,
+  AutoLock,
+};
+
+struct GoUISettings {
+  UnitsMode units = UnitsMode::Celsius;
+  PmDisplayMode pm_display = PmDisplayMode::Ugm3;
+  IntervalSetting display_interval = IntervalSetting::TenSeconds;
+  IntervalSetting pm_interval = IntervalSetting::TenSeconds;
+  IntervalSetting other_sensor_interval = IntervalSetting::TenSeconds;
+  GpsModeSetting gps_mode = GpsModeSetting::OnWhenTracking;
+  DeviceModeSetting mode = DeviceModeSetting::Stationary;
+  AutoLockSetting auto_lock = AutoLockSetting::TenSeconds;
+};
+
+struct PersistedGoUISettings {
+  uint32_t version = 1;
+  uint8_t units = (uint8_t)UnitsMode::Celsius;
+  uint8_t pm_display = (uint8_t)PmDisplayMode::Ugm3;
+  uint8_t display_interval = (uint8_t)IntervalSetting::TenSeconds;
+  uint8_t pm_interval = (uint8_t)IntervalSetting::TenSeconds;
+  uint8_t other_sensor_interval = (uint8_t)IntervalSetting::TenSeconds;
+  uint8_t gps_mode = (uint8_t)GpsModeSetting::OnWhenTracking;
+  uint8_t mode = (uint8_t)DeviceModeSetting::Stationary;
+  uint8_t auto_lock = (uint8_t)AutoLockSetting::TenSeconds;
+};
+
+struct MetricHistory {
+  static constexpr size_t kCapacity = 100;
+
+  float samples[kCapacity] = {};
+  size_t head = 0;
+  size_t count = 0;
+
+  void push(float value) {
+    if (!(value >= 0.0f)) {
+      return;
+    }
+    samples[head] = value;
+    head = (head + 1U) % kCapacity;
+    if (count < kCapacity) {
+      count += 1U;
+    }
+  }
+
+  size_t ordered_copy(float *out, size_t max_count, float *out_min, float *out_max) const {
+    if (out == nullptr || max_count == 0 || count == 0) {
+      if (out_min != nullptr) {
+        *out_min = 0.0f;
+      }
+      if (out_max != nullptr) {
+        *out_max = 0.0f;
+      }
+      return 0;
+    }
+
+    const size_t n = (count < max_count) ? count : max_count;
+    const size_t start = (count == kCapacity) ? head : 0U;
+    float min_value = 0.0f;
+    float max_value = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+      const float value = samples[(start + i) % kCapacity];
+      out[i] = value;
+      if (i == 0 || value < min_value) {
+        min_value = value;
+      }
+      if (i == 0 || value > max_value) {
+        max_value = value;
+      }
+    }
+
+    if (out_min != nullptr) {
+      *out_min = min_value;
+    }
+    if (out_max != nullptr) {
+      *out_max = max_value;
+    }
+    return n;
+  }
+};
+
+static GoUISettings default_ui_settings(void) { return GoUISettings{}; }
+
+static void normalize_ui_settings(GoUISettings *settings) {
+  if (settings == nullptr) {
+    return;
+  }
+  if ((uint8_t)settings->units > (uint8_t)UnitsMode::Fahrenheit) {
+    settings->units = UnitsMode::Celsius;
+  }
+  if ((uint8_t)settings->pm_display > (uint8_t)PmDisplayMode::Usaqi) {
+    settings->pm_display = PmDisplayMode::Ugm3;
+  }
+  if ((uint8_t)settings->display_interval > (uint8_t)IntervalSetting::Off) {
+    settings->display_interval = IntervalSetting::TenSeconds;
+  }
+  if ((uint8_t)settings->pm_interval > (uint8_t)IntervalSetting::Off) {
+    settings->pm_interval = IntervalSetting::TenSeconds;
+  }
+  if ((uint8_t)settings->other_sensor_interval > (uint8_t)IntervalSetting::Off) {
+    settings->other_sensor_interval = IntervalSetting::TenSeconds;
+  }
+  if ((uint8_t)settings->gps_mode > (uint8_t)GpsModeSetting::AlwaysOn) {
+    settings->gps_mode = GpsModeSetting::OnWhenTracking;
+  }
+  if ((uint8_t)settings->mode > (uint8_t)DeviceModeSetting::Offline) {
+    settings->mode = DeviceModeSetting::Stationary;
+  }
+  switch (settings->auto_lock) {
+  case AutoLockSetting::Off:
+  case AutoLockSetting::TenSeconds:
+  case AutoLockSetting::ThirtySeconds:
+  case AutoLockSetting::SixtySeconds:
+    break;
+  default:
+    settings->auto_lock = AutoLockSetting::TenSeconds;
+    break;
+  }
+}
+
+static bool load_ui_settings(GoUISettings *out) {
+  if (out == nullptr) {
+    return false;
+  }
+
+  *out = default_ui_settings();
+  nvs_handle_t handle = 0;
+  if (nvs_open("go_ui", NVS_READONLY, &handle) != ESP_OK) {
+    return false;
+  }
+
+  PersistedGoUISettings stored = {};
+  size_t size = sizeof(stored);
+  const esp_err_t err = nvs_get_blob(handle, "settings", &stored, &size);
+  nvs_close(handle);
+  if (err != ESP_OK || size != sizeof(stored) || stored.version != 1) {
+    return false;
+  }
+
+  out->units = (UnitsMode)stored.units;
+  out->pm_display = (PmDisplayMode)stored.pm_display;
+  out->display_interval = (IntervalSetting)stored.display_interval;
+  out->pm_interval = (IntervalSetting)stored.pm_interval;
+  out->other_sensor_interval = (IntervalSetting)stored.other_sensor_interval;
+  out->gps_mode = (GpsModeSetting)stored.gps_mode;
+  out->mode = (DeviceModeSetting)stored.mode;
+  out->auto_lock = (AutoLockSetting)stored.auto_lock;
+  normalize_ui_settings(out);
+  return true;
+}
+
+static void save_ui_settings(const GoUISettings &settings) {
+  PersistedGoUISettings stored = {};
+  stored.units = (uint8_t)settings.units;
+  stored.pm_display = (uint8_t)settings.pm_display;
+  stored.display_interval = (uint8_t)settings.display_interval;
+  stored.pm_interval = (uint8_t)settings.pm_interval;
+  stored.other_sensor_interval = (uint8_t)settings.other_sensor_interval;
+  stored.gps_mode = (uint8_t)settings.gps_mode;
+  stored.mode = (uint8_t)settings.mode;
+  stored.auto_lock = (uint8_t)settings.auto_lock;
+
+  nvs_handle_t handle = 0;
+  if (nvs_open("go_ui", NVS_READWRITE, &handle) != ESP_OK) {
+    return;
+  }
+  if (nvs_set_blob(handle, "settings", &stored, sizeof(stored)) == ESP_OK) {
+    (void)nvs_commit(handle);
+  }
+  nvs_close(handle);
+}
+
+static uint32_t interval_setting_to_ms(IntervalSetting interval) {
+  switch (interval) {
+  case IntervalSetting::OneSecond:
+    return 1000U;
+  case IntervalSetting::TenSeconds:
+    return 10000U;
+  case IntervalSetting::ThirtySeconds:
+    return 30000U;
+  case IntervalSetting::SixtySeconds:
+    return 60000U;
+  case IntervalSetting::FiveMinutes:
+    return 5U * 60U * 1000U;
+  case IntervalSetting::FifteenMinutes:
+    return 15U * 60U * 1000U;
+  case IntervalSetting::OneHour:
+    return 60U * 60U * 1000U;
+  case IntervalSetting::Off:
+  default:
+    return 0U;
+  }
+}
+
+static float pressure_to_altitude_m(float pressure_hpa) {
+  if (!(pressure_hpa > 0.0f)) {
+    return -1.0f;
+  }
+  return 44330.0f * (1.0f - powf(pressure_hpa / 1013.25f, 0.1903f));
+}
+
+static void utc_to_local_hm(int utc_hour, int utc_minute, int tz_offset_hours, uint8_t *out_hour,
                             uint8_t *out_minute) {
   if (out_hour == nullptr || out_minute == nullptr) {
     return;
@@ -358,18 +614,11 @@ static std::string build_ble_history_payload(const NandStorageService::Record &r
   return out;
 }
 
-static std::string build_ble_status_payload(State s,
-                                            bool gps_ok,
-                                            const GPSService::Data &gps,
-                                            bool battery_ok,
-                                            int battery_percent,
-                                            bool flash_ok,
-                                            uint32_t flash_avail_kb,
-                                            bool have_charging,
-                                            bool charging,
-                                            uint32_t route_id,
-                                            uint32_t tracking_sleep_s,
-                                            bool co2_calibrating) {
+static std::string build_ble_status_payload(State s, bool gps_ok, const GPSService::Data &gps,
+                                            bool battery_ok, int battery_percent, bool flash_ok,
+                                            uint32_t flash_avail_kb, bool have_charging,
+                                            bool charging, uint32_t route_id,
+                                            uint32_t tracking_sleep_s, bool co2_calibrating) {
   cJSON *root = cJSON_CreateObject();
   if (root == nullptr) {
     return {};
@@ -408,8 +657,7 @@ static std::string build_ble_status_payload(State s,
 }
 
 static std::string build_measures_payload(const NandStorageService::Record *recs,
-                                          const uint64_t *ts_ms,
-                                          uint32_t n) {
+                                          const uint64_t *ts_ms, uint32_t n) {
   if (recs == nullptr || ts_ms == nullptr || n == 0) {
     return {};
   }
@@ -648,30 +896,33 @@ static void log_bq25629_debug_snapshot(drivers::BQ25629 *charger) {
            "FORCE_PMID_DIS:%u WD_RST:%u) "
            "REG0x18: 0x%02X (EN_OTG:%u BATFET_CTRL:%u)",
            (unsigned)reg16, (unsigned)force_ibatdis, (unsigned)en_chg, (unsigned)en_hiz,
-           (unsigned)force_pmid_dis, (unsigned)wd_rst, (unsigned)reg18, (unsigned)en_otg, batfet_ctrl);
+           (unsigned)force_pmid_dis, (unsigned)wd_rst, (unsigned)reg18, (unsigned)en_otg,
+           batfet_ctrl);
 
-  ESP_LOGI("app_main",
-           "BQ25629 dbg - VBUS: %u, CHG: %u (%s), IOTG_REG: %u, VOTG_REG: %u, WD: %u",
+  ESP_LOGI("app_main", "BQ25629 dbg - VBUS: %u, CHG: %u (%s), IOTG_REG: %u, VOTG_REG: %u, WD: %u",
            (unsigned)status.vbus_status, (unsigned)status.charge_status,
            charge_status_name(status.charge_status), (unsigned)status.iindpm_stat,
            (unsigned)status.vindpm_stat, (unsigned)status.wd_stat);
 
-  ESP_LOGI("app_main", "BQ25629 fault - OTG: %u, TSHUT: %u, TS_STAT: %u, VBUS: %u, BAT: %u, SYS: %u",
+  ESP_LOGI("app_main",
+           "BQ25629 fault - OTG: %u, TSHUT: %u, TS_STAT: %u, VBUS: %u, BAT: %u, SYS: %u",
            (unsigned)fault.otg_fault, (unsigned)fault.tshut_fault, (unsigned)fault.ts_stat,
            (unsigned)fault.vbus_fault, (unsigned)fault.bat_fault, (unsigned)fault.sys_fault);
 
-  ESP_LOGI("app_main",
-           "BQ25629 adc - VPMID: %u mV, VBAT: %u mV, VSYS: %u mV, VBUS: %u mV, IBAT: %d mA, IBUS: %d mA",
-           (unsigned)adc.vpmid_mv, (unsigned)adc.vbat_mv, (unsigned)adc.vsys_mv, (unsigned)adc.vbus_mv,
-           (int)adc.ibat_ma, (int)adc.ibus_ma);
+  ESP_LOGI(
+      "app_main",
+      "BQ25629 adc - VPMID: %u mV, VBAT: %u mV, VSYS: %u mV, VBUS: %u mV, IBAT: %d mA, IBUS: %d mA",
+      (unsigned)adc.vpmid_mv, (unsigned)adc.vbat_mv, (unsigned)adc.vsys_mv, (unsigned)adc.vbus_mv,
+      (int)adc.ibat_ma, (int)adc.ibus_ma);
 }
 
 static void log_sensor_summary_banner(void) {
-  ESP_LOGI("app_main",
-           "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81"
-           "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81 SENSOR SUMMARY "
-           "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81"
-           "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81");
+  ESP_LOGI(
+      "app_main",
+      "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81"
+      "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81 SENSOR SUMMARY "
+      "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81"
+      "\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81\xE2\x94\x81");
 }
 
 static bool is_usb_c_adapter_present(drivers::VBusStatus s) {
@@ -906,18 +1157,15 @@ class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
                TVOCNOxSensor *tvoc_nox_sensor, CO2Sensor *co2_sensor, dps368_handle_t *dps368,
-               Scd4xTest *scd4x, s12_i2c_t *s12, sunrise_i2c_t *sunrise,
-               BLEStream *ble,
+               Scd4xTest *scd4x, s12_i2c_t *s12, sunrise_i2c_t *sunrise, BLEStream *ble,
                i2c_master_bus_handle_t i2c_bus, GPSService *gps, dashboard::Dashboard *dash,
-               NandStorageService *storage,
-               drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms, uint32_t last_bq_wdt_reset_ms)
-       : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
-          tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), scd4x_(scd4x),
-          s12_(s12), sunrise_(sunrise), ble_(ble),
-          i2c_bus_(i2c_bus), gps_(gps),
-          dash_(dash),
-          storage_(storage), charger_(charger),
-          last_wdt_reset_ms_(last_wdt_reset_ms), last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
+               NandStorageService *storage, drivers::BQ25629 *charger, uint32_t last_wdt_reset_ms,
+               uint32_t last_bq_wdt_reset_ms)
+      : buttons_(buttons), input_queue_(input_queue), pm_sensor_(pm_sensor),
+        tvoc_nox_sensor_(tvoc_nox_sensor), co2_sensor_(co2_sensor), dps368_(dps368), scd4x_(scd4x),
+        s12_(s12), sunrise_(sunrise), ble_(ble), i2c_bus_(i2c_bus), gps_(gps), dash_(dash),
+        storage_(storage), charger_(charger), last_wdt_reset_ms_(last_wdt_reset_ms),
+        last_bq_wdt_reset_ms_(last_bq_wdt_reset_ms) {}
 
   void OnButtonEvent(int32_t id, const ButtonService::Payload *p) {
     if (p == nullptr) {
@@ -953,16 +1201,28 @@ public:
     }
 
     if (p->source == ButtonService::Source::Touch) {
-      if (ev != ButtonService::Event::LongPress) {
-        return;
-      }
-
       GoInputEvent e;
-      if (p->id == GO_TOUCH_RIGHT_ID) {
+      if (ev == ButtonService::Event::ShortPress && p->id == GO_TOUCH_RIGHT_ID) {
+        e.type = GoInputEventType::TouchRightShort;
+        ESP_LOGI(GO_TAG, "event: touch right short");
+        (void)xQueueSend(input_queue_, &e, 0);
+      } else if (ev == ButtonService::Event::ShortPress && p->id == GO_TOUCH_LEFT_ID) {
+        e.type = GoInputEventType::TouchLeftShort;
+        ESP_LOGI(GO_TAG, "event: touch left short");
+        (void)xQueueSend(input_queue_, &e, 0);
+      } else if (ev == ButtonService::Event::ShortPress && p->id == GO_TOUCH_ENTER_ID) {
+        e.type = GoInputEventType::TouchEnterShort;
+        ESP_LOGI(GO_TAG, "event: touch enter short");
+        (void)xQueueSend(input_queue_, &e, 0);
+      } else if (ev == ButtonService::Event::LongPress && p->id == GO_TOUCH_RIGHT_ID) {
         e.type = GoInputEventType::TouchRightLong;
         ESP_LOGI(GO_TAG, "event: touch right long");
         (void)xQueueSend(input_queue_, &e, 0);
-      } else if (p->id == GO_TOUCH_ENTER_ID) {
+      } else if (ev == ButtonService::Event::LongPress && p->id == GO_TOUCH_LEFT_ID) {
+        e.type = GoInputEventType::TouchLeftLong;
+        ESP_LOGI(GO_TAG, "event: touch left long");
+        (void)xQueueSend(input_queue_, &e, 0);
+      } else if (ev == ButtonService::Event::LongPress && p->id == GO_TOUCH_ENTER_ID) {
         e.type = GoInputEventType::TouchEnterLong;
         ESP_LOGI(GO_TAG, "event: touch enter long");
         (void)xQueueSend(input_queue_, &e, 0);
@@ -1045,15 +1305,33 @@ private:
   bool battery_percent_ok_ = false;
   int battery_percent_ = -1;
 
-  dashboard::Values dash_values_{MeasuresInvalid::CO2,
-                                MeasuresInvalid::PM,
-                                MeasuresInvalid::TEMPERATURE,
-                                (int)MeasuresInvalid::HUMIDITY,
-                                0xFF,
-                                0xFF,
-                                0xFF,
-                                false,
-                                0};
+  GoUISettings ui_settings_ = default_ui_settings();
+  dashboard::Screen ui_screen_ = dashboard::Screen::Home;
+  dashboard::Metric active_metric_ = dashboard::Metric::None;
+  SettingChoiceKind choice_kind_ = SettingChoiceKind::None;
+  uint8_t main_menu_index_ = 0;
+  uint8_t settings_index_ = 1;
+  uint8_t settings_choice_index_ = 1;
+  uint8_t settings_choice_scroll_ = 0;
+  uint8_t tag_index_ = 1;
+  uint8_t about_index_ = 1;
+  uint8_t confirm_index_ = 1;
+  bool device_locked_ = false;
+  uint32_t last_ui_interaction_ms_ = 0;
+  uint32_t snackbar_deadline_ms_ = 0;
+  char snackbar_text_[48] = {};
+  char ui_row_buffers_[dashboard::MAX_LIST_ROWS][40] = {};
+  char about_firmware_line_[64] = {};
+  char about_serial_line_[64] = {};
+  std::string last_saved_tag_;
+  float chart_render_samples_[MetricHistory::kCapacity] = {};
+  MetricHistory pm_history_;
+  MetricHistory co2_history_;
+  MetricHistory temp_history_;
+  MetricHistory humidity_history_;
+  MetricHistory tvoc_history_;
+  MetricHistory nox_history_;
+  dashboard::Values dash_values_{};
 
   bool flash_avail_ok_ = false;
   uint32_t flash_avail_kb_ = 0;
@@ -1078,9 +1356,400 @@ private:
 
   bool co2_calibrating_ = false;
 
-
   bool ble_status_dirty_ = true;
   bool last_ble_status_subscribed_ = false;
+
+  static const char *_interval_label_(IntervalSetting interval, bool display_interval) {
+    switch (interval) {
+    case IntervalSetting::OneSecond:
+      return "1s";
+    case IntervalSetting::TenSeconds:
+      return "10s";
+    case IntervalSetting::ThirtySeconds:
+      return "30s";
+    case IntervalSetting::SixtySeconds:
+      return "60s";
+    case IntervalSetting::FiveMinutes:
+      return "5m";
+    case IntervalSetting::FifteenMinutes:
+      return "15m";
+    case IntervalSetting::OneHour:
+      return "1h";
+    case IntervalSetting::Off:
+    default:
+      return display_interval ? "Display Off" : "Off";
+    }
+  }
+
+  static const char *_units_label_(UnitsMode units) {
+    return units == UnitsMode::Fahrenheit ? "F" : "C";
+  }
+
+  static const char *_pm_display_label_(PmDisplayMode mode) {
+    return mode == PmDisplayMode::Usaqi ? "USAQI" : "ug/m3";
+  }
+
+  static const char *_gps_mode_label_(GpsModeSetting mode) {
+    switch (mode) {
+    case GpsModeSetting::AlwaysOff:
+      return "Always Off";
+    case GpsModeSetting::AlwaysOn:
+      return "Always On";
+    case GpsModeSetting::OnWhenTracking:
+    default:
+      return "On When Tracking";
+    }
+  }
+
+  static const char *_device_mode_label_(DeviceModeSetting mode) {
+    switch (mode) {
+    case DeviceModeSetting::Portable:
+      return "Portable";
+    case DeviceModeSetting::Offline:
+      return "Offline / Airplane Mode";
+    case DeviceModeSetting::Stationary:
+    default:
+      return "Stationary";
+    }
+  }
+
+  static const char *_auto_lock_label_(AutoLockSetting lock) {
+    switch (lock) {
+    case AutoLockSetting::Off:
+      return "Off";
+    case AutoLockSetting::ThirtySeconds:
+      return "30 Seconds";
+    case AutoLockSetting::SixtySeconds:
+      return "60 Seconds";
+    case AutoLockSetting::TenSeconds:
+    default:
+      return "10 Seconds";
+    }
+  }
+
+  bool _display_off_active_(void) const {
+    return ui_settings_.display_interval == IntervalSetting::Off;
+  }
+
+  bool _gps_icon_enabled_(void) const {
+    switch (ui_settings_.gps_mode) {
+    case GpsModeSetting::AlwaysOff:
+      return false;
+    case GpsModeSetting::AlwaysOn:
+      return true;
+    case GpsModeSetting::OnWhenTracking:
+    default:
+      return _state == State::Tracking;
+    }
+  }
+
+  uint32_t _auto_lock_timeout_ms_(void) const { return (uint32_t)ui_settings_.auto_lock * 1000U; }
+
+  bool _snackbar_active_(void) const {
+    return snackbar_text_[0] != '\0' && snackbar_deadline_ms_ != 0 &&
+           (int32_t)(snackbar_deadline_ms_ - now_ms()) > 0;
+  }
+
+  void _clear_snackbar_if_expired_(void) {
+    if (snackbar_text_[0] == '\0' || snackbar_deadline_ms_ == 0) {
+      return;
+    }
+    if ((int32_t)(snackbar_deadline_ms_ - now_ms()) <= 0) {
+      snackbar_text_[0] = '\0';
+      snackbar_deadline_ms_ = 0;
+    }
+  }
+
+  void _show_snackbar_(const char *text) {
+    if (text == nullptr) {
+      snackbar_text_[0] = '\0';
+      snackbar_deadline_ms_ = 0;
+      return;
+    }
+    (void)snprintf(snackbar_text_, sizeof(snackbar_text_), "%s", text);
+    snackbar_deadline_ms_ = now_ms() + 3000U;
+  }
+
+  void _copy_row_text_(dashboard::Values *v, uint8_t visible_row, const char *text, bool disabled) {
+    if (v == nullptr || visible_row >= dashboard::MAX_LIST_ROWS) {
+      return;
+    }
+    if (text == nullptr) {
+      ui_row_buffers_[visible_row][0] = '\0';
+      v->rows[visible_row].text = nullptr;
+      v->rows[visible_row].disabled = disabled;
+      return;
+    }
+    (void)snprintf(ui_row_buffers_[visible_row], sizeof(ui_row_buffers_[visible_row]), "%s", text);
+    v->rows[visible_row].text = ui_row_buffers_[visible_row];
+    v->rows[visible_row].disabled = disabled;
+  }
+
+  void _populate_chart_(dashboard::Values *v) {
+    if (v == nullptr || _display_off_active_()) {
+      return;
+    }
+    if (!(ui_screen_ == dashboard::Screen::Home || ui_screen_ == dashboard::Screen::MainMenu)) {
+      return;
+    }
+
+    const MetricHistory *history = nullptr;
+    switch (active_metric_) {
+    case dashboard::Metric::Pm25:
+      history = &pm_history_;
+      break;
+    case dashboard::Metric::Co2:
+      history = &co2_history_;
+      break;
+    case dashboard::Metric::Temp:
+      history = &temp_history_;
+      break;
+    case dashboard::Metric::Humidity:
+      history = &humidity_history_;
+      break;
+    case dashboard::Metric::Tvoc:
+      history = &tvoc_history_;
+      break;
+    case dashboard::Metric::Nox:
+      history = &nox_history_;
+      break;
+    case dashboard::Metric::None:
+    default:
+      break;
+    }
+
+    if (history == nullptr) {
+      return;
+    }
+
+    float min_value = 0.0f;
+    float max_value = 0.0f;
+    const size_t count = history->ordered_copy(chart_render_samples_, MetricHistory::kCapacity,
+                                               &min_value, &max_value);
+    v->chart_samples = chart_render_samples_;
+    v->chart_count = (uint8_t)count;
+    v->chart_min = count == 0 ? -1.0f : min_value;
+    v->chart_max = count == 0 ? -1.0f : max_value;
+  }
+
+  void _populate_dashboard_rows_(dashboard::Values *v) {
+    if (v == nullptr) {
+      return;
+    }
+
+    for (size_t i = 0; i < dashboard::MAX_LIST_ROWS; ++i) {
+      _copy_row_text_(v, (uint8_t)i, nullptr, false);
+    }
+    v->row_count = 0;
+    v->selected_row = 0;
+    v->show_separator_after_back = false;
+    v->about_title = nullptr;
+    v->about_firmware = nullptr;
+    v->about_serial = nullptr;
+    v->about_hardware = nullptr;
+    v->chart_samples = nullptr;
+    v->chart_count = 0;
+    v->chart_min = 0.0f;
+    v->chart_max = 0.0f;
+
+    if (ui_screen_ == dashboard::Screen::Home) {
+      _populate_chart_(v);
+      return;
+    }
+
+    if (ui_screen_ == dashboard::Screen::MainMenu) {
+      const bool add_tag_disabled = _state != State::Tracking;
+      v->row_count = 5;
+      _copy_row_text_(v, 0, "Exit Menu", false);
+      _copy_row_text_(v, 1, _state == State::Tracking ? "Stop Tracking" : "Start Tracking", false);
+      _copy_row_text_(v, 2, "Add Tag", add_tag_disabled);
+      _copy_row_text_(v, 3, "Settings", false);
+      _copy_row_text_(v, 4, "About Device", false);
+      v->selected_row = main_menu_index_;
+      _populate_chart_(v);
+      return;
+    }
+
+    if (ui_screen_ == dashboard::Screen::Settings) {
+      static constexpr int total_items = 11;
+      const uint8_t visible_start =
+          (settings_index_ <= 1) ? 0 : (uint8_t)(((settings_index_ - 2) / 7) * 7);
+      v->row_count = 2;
+      _copy_row_text_(v, 0, "Exit", false);
+      _copy_row_text_(v, 1, "Back", false);
+      for (uint8_t visible = 0; visible < 7 && (visible_start + visible) < (total_items - 2);
+           ++visible) {
+        const int item_index = 2 + visible_start + visible;
+        char *dst = ui_row_buffers_[2 + visible];
+        switch (item_index) {
+        case 2:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "Units: %s",
+                         _units_label_(ui_settings_.units));
+          break;
+        case 3:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "PM Display: %s",
+                         _pm_display_label_(ui_settings_.pm_display));
+          break;
+        case 4:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "Display Interval: %s",
+                         _interval_label_(ui_settings_.display_interval, true));
+          break;
+        case 5:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "PM Interval: %s",
+                         _interval_label_(ui_settings_.pm_interval, false));
+          break;
+        case 6:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "Other Sensor Int.: %s",
+                         _interval_label_(ui_settings_.other_sensor_interval, false));
+          break;
+        case 7:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "GPS Mode: %s",
+                         _gps_mode_label_(ui_settings_.gps_mode));
+          break;
+        case 8:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "Mode: %s",
+                         _device_mode_label_(ui_settings_.mode));
+          break;
+        case 9:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "Auto Lock: %s",
+                         _auto_lock_label_(ui_settings_.auto_lock));
+          break;
+        case 10:
+        default:
+          (void)snprintf(dst, sizeof(ui_row_buffers_[2 + visible]), "Data: Clear Data");
+          break;
+        }
+        v->rows[2 + visible].text = dst;
+        v->rows[2 + visible].disabled = false;
+        v->row_count = (uint8_t)(3 + visible);
+      }
+      v->selected_row = (settings_index_ <= 1)
+                            ? settings_index_
+                            : (uint8_t)(2 + (settings_index_ - 2 - visible_start));
+      v->show_separator_after_back = true;
+      return;
+    }
+
+    if (ui_screen_ == dashboard::Screen::SettingsChoice) {
+      const char *options[8] = {};
+      uint8_t option_count = 0;
+      switch (choice_kind_) {
+      case SettingChoiceKind::Units:
+        options[0] = "C";
+        options[1] = "F";
+        option_count = 2;
+        break;
+      case SettingChoiceKind::PmDisplay:
+        options[0] = "ug/m3";
+        options[1] = "USAQI";
+        option_count = 2;
+        break;
+      case SettingChoiceKind::DisplayInterval:
+      case SettingChoiceKind::PmInterval:
+      case SettingChoiceKind::OtherSensorInterval:
+        options[0] = "1s";
+        options[1] = "10s";
+        options[2] = "30s";
+        options[3] = "60s";
+        options[4] = "5m";
+        options[5] = "15m";
+        options[6] = "1h";
+        options[7] = choice_kind_ == SettingChoiceKind::DisplayInterval ? "Display Off" : "Off";
+        option_count = 8;
+        break;
+      case SettingChoiceKind::GpsMode:
+        options[0] = "Always Off";
+        options[1] = "On When Tracking";
+        options[2] = "Always On";
+        option_count = 3;
+        break;
+      case SettingChoiceKind::Mode:
+        options[0] = "Stationary";
+        options[1] = "Portable";
+        options[2] = "Offline / Airplane Mode";
+        option_count = 3;
+        break;
+      case SettingChoiceKind::AutoLock:
+        options[0] = "Off";
+        options[1] = "10 Seconds";
+        options[2] = "30 Seconds";
+        options[3] = "60 Seconds";
+        option_count = 4;
+        break;
+      case SettingChoiceKind::None:
+      default:
+        break;
+      }
+
+      v->row_count = 2;
+      _copy_row_text_(v, 0, "Exit", false);
+      _copy_row_text_(v, 1, "Back", false);
+      const uint8_t max_scroll = (option_count > 7) ? (uint8_t)(option_count - 7) : 0;
+      if (settings_choice_scroll_ > max_scroll) {
+        settings_choice_scroll_ = max_scroll;
+      }
+      for (uint8_t visible = 0; visible < 7 && (settings_choice_scroll_ + visible) < option_count;
+           ++visible) {
+        _copy_row_text_(v, (uint8_t)(2 + visible), options[settings_choice_scroll_ + visible],
+                        false);
+        v->row_count = (uint8_t)(3 + visible);
+      }
+      v->selected_row = (settings_choice_index_ <= 1)
+                            ? settings_choice_index_
+                            : (uint8_t)(2 + (settings_choice_index_ - 2 - settings_choice_scroll_));
+      return;
+    }
+
+    if (ui_screen_ == dashboard::Screen::TagList) {
+      static const char *tags[] = {
+          "Traffic Emissions", "Road Dust",         "Construction Work", "Biomass Burning",
+          "Garbage Burning",   "Factory Emissions", "Smoking/Vaping",    "Cooking",
+          "Paint/Solvents",    "Other Pollution",
+      };
+      const uint8_t visible_start = (tag_index_ <= 1) ? 0 : (uint8_t)(((tag_index_ - 2) / 7) * 7);
+      v->row_count = 2;
+      _copy_row_text_(v, 0, "Exit", false);
+      _copy_row_text_(v, 1, "Back", false);
+      for (uint8_t visible = 0; visible < 7 && (visible_start + visible) < 10; ++visible) {
+        _copy_row_text_(v, (uint8_t)(2 + visible), tags[visible_start + visible], false);
+        v->row_count = (uint8_t)(3 + visible);
+      }
+      v->selected_row =
+          (tag_index_ <= 1) ? tag_index_ : (uint8_t)(2 + (tag_index_ - 2 - visible_start));
+      v->show_separator_after_back = true;
+      return;
+    }
+
+    if (ui_screen_ == dashboard::Screen::About) {
+      const esp_app_desc_t *app_desc = esp_app_get_description();
+      (void)snprintf(about_firmware_line_, sizeof(about_firmware_line_), "Firmware v%s",
+                     (app_desc != nullptr && app_desc->version[0] != '\0') ? app_desc->version
+                                                                           : "?");
+      (void)snprintf(about_serial_line_, sizeof(about_serial_line_), "Serial %s",
+                     _serial_number.empty() ? "UNKNOWN" : _serial_number.c_str());
+      v->row_count = 2;
+      _copy_row_text_(v, 0, "Exit", false);
+      _copy_row_text_(v, 1, "Back", false);
+      v->selected_row = about_index_;
+      v->show_separator_after_back = true;
+      v->about_title = "AirGradient Go";
+      v->about_firmware = about_firmware_line_;
+      v->about_serial = about_serial_line_;
+      v->about_hardware = "Open Source Hardware";
+      return;
+    }
+
+    if (ui_screen_ == dashboard::Screen::Confirm) {
+      v->row_count = 5;
+      _copy_row_text_(v, 0, "Exit", false);
+      _copy_row_text_(v, 1, "Back", false);
+      _copy_row_text_(v, 2, "Clear Data?", false);
+      _copy_row_text_(v, 3, "No", false);
+      _copy_row_text_(v, 4, "Yes", false);
+      v->selected_row = confirm_index_;
+      return;
+    }
+  }
 
   void _ble_notify_status_now(State s) {
     if (ble_ == nullptr) {
@@ -1101,26 +1770,9 @@ private:
 
     const std::string payload = build_ble_status_payload(
         s, gps_ok, d, battery_percent_ok_, battery_percent_, flash_avail_ok_, flash_avail_kb_,
-        charger_vbus_seen_, usb_c_adapter_present_,
-        tracking_session_id_, tracking_sleep_interval_s_, co2_calibrating_);
+        charger_vbus_seen_, usb_c_adapter_present_, tracking_session_id_,
+        tracking_sleep_interval_s_, co2_calibrating_);
     ble_->notify_status(payload);
-  }
-
-  uint8_t _dashboard_status_mask_(bool gps_ok, const GPSService::Data &gps) const {
-    uint8_t m = 0;
-    if (_state == State::Sync) {
-      m = (uint8_t)(m | dashboard::STATUS_SYNC);
-    }
-    if (_state == State::Tracking) {
-      m = (uint8_t)(m | dashboard::STATUS_TRACKING);
-    }
-    if (gps_ok && gps.fix_valid) {
-      m = (uint8_t)(m | dashboard::STATUS_GPS_FIX);
-    }
-    if (ble_ != nullptr && ble_->is_connected()) {
-      m = (uint8_t)(m | dashboard::STATUS_BLE_CONNECTED);
-    }
-    return m;
   }
 
   void _dashboard_update_status_only_(void) {
@@ -1135,19 +1787,24 @@ private:
       gps_ok = true;
     }
 
+    _clear_snackbar_if_expired_();
+
     dashboard::Values v = dash_values_;
-    v.status_mask = _dashboard_status_mask_(gps_ok, d);
 
     if (gps_ok && d.utc.time_valid) {
       utc_to_local_hm(d.utc.hour, d.utc.min, 7, &v.hour, &v.minute);
+    } else {
+      v.hour = 0xFF;
+      v.minute = 0xFF;
     }
 
     _sample_battery_percent();
-    // Keep battery percent "unknown" (0xFF) until it was populated at least once
-    // by a measurement update.
-    if (battery_percent_ok_ && v.battery_pct != 0xFFu) {
-      const int bp = (battery_percent_ < 0) ? 0 : ((battery_percent_ > 100) ? 100 : battery_percent_);
+    if (battery_percent_ok_) {
+      const int bp =
+          (battery_percent_ < 0) ? 0 : ((battery_percent_ > 100) ? 100 : battery_percent_);
       v.battery_pct = (uint8_t)bp;
+    } else {
+      v.battery_pct = 0xFFu;
     }
 
     if (charger_ != nullptr) {
@@ -1156,6 +1813,22 @@ private:
         v.is_battery_charging = ch;
       }
     }
+
+    v.locked = device_locked_;
+    v.ble_enabled = ui_settings_.mode == DeviceModeSetting::Portable;
+    v.ble_connected = v.ble_enabled && ble_ != nullptr && ble_->is_connected();
+    v.wifi_enabled = ui_settings_.mode == DeviceModeSetting::Stationary;
+    v.gps_enabled = _gps_icon_enabled_();
+    v.gps_fix = v.gps_enabled && gps_ok && d.fix_valid;
+    v.tracking_active = _state == State::Tracking;
+    v.sync_active = _state == State::Sync;
+    v.display_off = _display_off_active_();
+    v.use_fahrenheit = ui_settings_.units == UnitsMode::Fahrenheit;
+    v.pm_use_usaqi = ui_settings_.pm_display == PmDisplayMode::Usaqi;
+    v.screen = (_state == State::Shutdown) ? dashboard::Screen::Shutdown : ui_screen_;
+    v.active_metric = active_metric_;
+    v.snackbar_text = _snackbar_active_() ? snackbar_text_ : nullptr;
+    _populate_dashboard_rows_(&v);
 
     dash_->update(v);
     dash_values_ = v;
@@ -1206,7 +1879,8 @@ private:
 
     static constexpr uint32_t SAMPLE_INTERVAL_MS = 10000;
     const uint32_t now = now_ms();
-    if (last_flash_avail_sample_ms_ != 0 && (now - last_flash_avail_sample_ms_) < SAMPLE_INTERVAL_MS) {
+    if (last_flash_avail_sample_ms_ != 0 &&
+        (now - last_flash_avail_sample_ms_) < SAMPLE_INTERVAL_MS) {
       return;
     }
     last_flash_avail_sample_ms_ = now;
@@ -1222,8 +1896,8 @@ private:
     flash_avail_ok_ = true;
     flash_avail_kb_ = (uint32_t)(free_bytes / 1024ULL);
 
-    ESP_LOGI(GO_TAG, "flash: total=%" PRIu64 " free=%" PRIu64 " avail_kb=%" PRIu32,
-             total_bytes, free_bytes, flash_avail_kb_);
+    ESP_LOGI(GO_TAG, "flash: total=%" PRIu64 " free=%" PRIu64 " avail_kb=%" PRIu32, total_bytes,
+             free_bytes, flash_avail_kb_);
   }
 
   void _apply_ble_config_if_needed(void) {
@@ -1369,7 +2043,8 @@ private:
     if (sunrise_ != nullptr) {
       ESP_LOGI(GO_TAG, "co2ForceCalib (sunlight) begin target=%u ppm", (unsigned)ppm);
       const esp_err_t err = sunrise_i2c_force_calibration(sunrise_, ppm, 0);
-      ESP_LOGI(GO_TAG, "co2ForceCalib (sunlight) %s", (err == ESP_OK) ? "ok" : esp_err_to_name(err));
+      ESP_LOGI(GO_TAG, "co2ForceCalib (sunlight) %s",
+               (err == ESP_OK) ? "ok" : esp_err_to_name(err));
     }
 
     co2_calibrating_ = false;
@@ -1520,7 +2195,8 @@ private:
     }
   }
 
-  void _ble_notify(const NandStorageService::Record &rec, bool gps_ok, const GPSService::Data &gps) {
+  void _ble_notify(const NandStorageService::Record &rec, bool gps_ok,
+                   const GPSService::Data &gps) {
     if (ble_ == nullptr) {
       return;
     }
@@ -1535,9 +2211,9 @@ private:
     if (ble_->status_subscribed()) {
       _sample_flash_avail_if_needed();
       const std::string payload = build_ble_status_payload(
-          _state, gps_ok, gps, battery_percent_ok_, battery_percent_, flash_avail_ok_, flash_avail_kb_,
-          charger_vbus_seen_,
-          usb_c_adapter_present_, rec.id, tracking_sleep_interval_s_, co2_calibrating_);
+          _state, gps_ok, gps, battery_percent_ok_, battery_percent_, flash_avail_ok_,
+          flash_avail_kb_, charger_vbus_seen_, usb_c_adapter_present_, rec.id,
+          tracking_sleep_interval_s_, co2_calibrating_);
       ble_->notify_status(payload);
     }
   }
@@ -1545,6 +2221,24 @@ private:
   void _init(void) {
     tracking_session_id_ = RTC_TRACKING_SESSION_ID;
     _serial_number = buildSerialNumber();
+    ui_settings_ = default_ui_settings();
+    (void)load_ui_settings(&ui_settings_);
+    normalize_ui_settings(&ui_settings_);
+    ui_screen_ = dashboard::Screen::Home;
+    active_metric_ = dashboard::Metric::None;
+    choice_kind_ = SettingChoiceKind::None;
+    main_menu_index_ = 0;
+    settings_index_ = 1;
+    settings_choice_index_ = 1;
+    settings_choice_scroll_ = 0;
+    tag_index_ = 1;
+    about_index_ = 1;
+    confirm_index_ = 1;
+    device_locked_ = false;
+    snackbar_text_[0] = '\0';
+    snackbar_deadline_ms_ = 0;
+    last_ui_interaction_ms_ = now_ms();
+    dash_values_ = dashboard::Values{};
 
     tracking_sleep_interval_s_ = RTC_TRACKING_SLEEP_INTERVAL_S;
     if (tracking_sleep_interval_s_ == 0) {
@@ -1583,7 +2277,8 @@ private:
     ESP_LOGI(GO_TAG, "wake cause=%d last=%s initial=%s", (int)cause, state_name(last),
              state_name(initial));
 
-    if (ble_ != nullptr && initial != State::Sync) {
+    if (ble_ != nullptr && initial != State::Sync &&
+        ui_settings_.mode == DeviceModeSetting::Portable) {
       (void)ble_->start(ble_device_name_.c_str());
     }
     _transition(initial);
@@ -1612,6 +2307,12 @@ private:
         in.button_long = true;
       } else if (ev.type == GoInputEventType::BootLong) {
         in.boot_long = true;
+      } else if (ev.type == GoInputEventType::TouchRightShort) {
+        in.touch_right_short = true;
+      } else if (ev.type == GoInputEventType::TouchLeftShort) {
+        in.touch_left_short = true;
+      } else if (ev.type == GoInputEventType::TouchEnterShort) {
+        in.touch_enter_short = true;
       } else if (ev.type == GoInputEventType::TouchRightLong) {
         in.touch_right_long = true;
       } else if (ev.type == GoInputEventType::TouchLeftLong) {
@@ -1621,6 +2322,575 @@ private:
       }
     }
     return in;
+  }
+
+  void _mark_ui_interaction_(void) { last_ui_interaction_ms_ = now_ms(); }
+
+  void _apply_mode_runtime_(void) {
+    if (ble_ == nullptr) {
+      return;
+    }
+    if (ui_settings_.mode == DeviceModeSetting::Portable && _state != State::Sync) {
+      (void)ble_->start(ble_device_name_.c_str());
+    } else {
+      ble_->stop();
+    }
+    ble_status_dirty_ = true;
+  }
+
+  void _return_home_(bool clear_metric) {
+    ui_screen_ = dashboard::Screen::Home;
+    choice_kind_ = SettingChoiceKind::None;
+    settings_choice_index_ = 1;
+    settings_choice_scroll_ = 0;
+    if (clear_metric) {
+      active_metric_ = dashboard::Metric::None;
+    }
+  }
+
+  void _toggle_lock_(void) {
+    device_locked_ = !device_locked_;
+    if (device_locked_) {
+      _show_snackbar_("Buttons locked");
+    } else {
+      _show_snackbar_("Buttons unlocked");
+      _mark_ui_interaction_();
+    }
+    _dashboard_update_status_only_();
+  }
+
+  void _browse_metric_(int delta) {
+    static const dashboard::Metric order[] = {
+        dashboard::Metric::None, dashboard::Metric::Pm25,     dashboard::Metric::Co2,
+        dashboard::Metric::Temp, dashboard::Metric::Humidity, dashboard::Metric::Tvoc,
+        dashboard::Metric::Nox,
+    };
+    int current = 0;
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); ++i) {
+      if (order[i] == active_metric_) {
+        current = (int)i;
+        break;
+      }
+    }
+    const int total = (int)(sizeof(order) / sizeof(order[0]));
+    current = (current + delta + total) % total;
+    active_metric_ = order[current];
+  }
+
+  void _push_history_(dashboard::Metric metric, float value) {
+    switch (metric) {
+    case dashboard::Metric::Pm25:
+      pm_history_.push(value);
+      break;
+    case dashboard::Metric::Co2:
+      co2_history_.push(value);
+      break;
+    case dashboard::Metric::Temp:
+      temp_history_.push(value);
+      break;
+    case dashboard::Metric::Humidity:
+      humidity_history_.push(value);
+      break;
+    case dashboard::Metric::Tvoc:
+      tvoc_history_.push(value);
+      break;
+    case dashboard::Metric::Nox:
+      nox_history_.push(value);
+      break;
+    case dashboard::Metric::None:
+    default:
+      break;
+    }
+  }
+
+  SettingChoiceKind _setting_choice_kind_for_index_(uint8_t settings_index) const {
+    switch (settings_index) {
+    case 2:
+      return SettingChoiceKind::Units;
+    case 3:
+      return SettingChoiceKind::PmDisplay;
+    case 4:
+      return SettingChoiceKind::DisplayInterval;
+    case 5:
+      return SettingChoiceKind::PmInterval;
+    case 6:
+      return SettingChoiceKind::OtherSensorInterval;
+    case 7:
+      return SettingChoiceKind::GpsMode;
+    case 8:
+      return SettingChoiceKind::Mode;
+    case 9:
+      return SettingChoiceKind::AutoLock;
+    default:
+      return SettingChoiceKind::None;
+    }
+  }
+
+  uint8_t _setting_choice_option_count_(void) const {
+    switch (choice_kind_) {
+    case SettingChoiceKind::Units:
+    case SettingChoiceKind::PmDisplay:
+      return 2;
+    case SettingChoiceKind::DisplayInterval:
+    case SettingChoiceKind::PmInterval:
+    case SettingChoiceKind::OtherSensorInterval:
+      return 8;
+    case SettingChoiceKind::GpsMode:
+    case SettingChoiceKind::Mode:
+      return 3;
+    case SettingChoiceKind::AutoLock:
+      return 4;
+    case SettingChoiceKind::None:
+    default:
+      return 0;
+    }
+  }
+
+  uint8_t _setting_choice_current_option_(void) const {
+    switch (choice_kind_) {
+    case SettingChoiceKind::Units:
+      return (uint8_t)ui_settings_.units;
+    case SettingChoiceKind::PmDisplay:
+      return (uint8_t)ui_settings_.pm_display;
+    case SettingChoiceKind::DisplayInterval:
+      return (uint8_t)ui_settings_.display_interval;
+    case SettingChoiceKind::PmInterval:
+      return (uint8_t)ui_settings_.pm_interval;
+    case SettingChoiceKind::OtherSensorInterval:
+      return (uint8_t)ui_settings_.other_sensor_interval;
+    case SettingChoiceKind::GpsMode:
+      return (uint8_t)ui_settings_.gps_mode;
+    case SettingChoiceKind::Mode:
+      return (uint8_t)ui_settings_.mode;
+    case SettingChoiceKind::AutoLock:
+      switch (ui_settings_.auto_lock) {
+      case AutoLockSetting::Off:
+        return 0;
+      case AutoLockSetting::TenSeconds:
+        return 1;
+      case AutoLockSetting::ThirtySeconds:
+        return 2;
+      case AutoLockSetting::SixtySeconds:
+      default:
+        return 3;
+      }
+    case SettingChoiceKind::None:
+    default:
+      return 0;
+    }
+  }
+
+  void _sync_choice_scroll_(void) {
+    const uint8_t option_count = _setting_choice_option_count_();
+    if (settings_choice_index_ <= 1 || option_count <= 7) {
+      settings_choice_scroll_ = 0;
+      return;
+    }
+    const uint8_t option_index = (uint8_t)(settings_choice_index_ - 2);
+    if (option_index < settings_choice_scroll_) {
+      settings_choice_scroll_ = option_index;
+    } else if (option_index >= (uint8_t)(settings_choice_scroll_ + 7)) {
+      settings_choice_scroll_ = (uint8_t)(option_index - 6);
+    }
+    const uint8_t max_scroll = (option_count > 7) ? (uint8_t)(option_count - 7) : 0;
+    if (settings_choice_scroll_ > max_scroll) {
+      settings_choice_scroll_ = max_scroll;
+    }
+  }
+
+  void _open_choice_for_setting_(SettingChoiceKind kind) {
+    choice_kind_ = kind;
+    ui_screen_ = dashboard::Screen::SettingsChoice;
+    settings_choice_index_ = (uint8_t)(2 + _setting_choice_current_option_());
+    _sync_choice_scroll_();
+  }
+
+  void _apply_setting_choice_(uint8_t option_index) {
+    if (choice_kind_ == SettingChoiceKind::None) {
+      return;
+    }
+    switch (choice_kind_) {
+    case SettingChoiceKind::Units:
+      ui_settings_.units = option_index == 0 ? UnitsMode::Celsius : UnitsMode::Fahrenheit;
+      break;
+    case SettingChoiceKind::PmDisplay:
+      ui_settings_.pm_display = option_index == 0 ? PmDisplayMode::Ugm3 : PmDisplayMode::Usaqi;
+      break;
+    case SettingChoiceKind::DisplayInterval:
+      ui_settings_.display_interval = (IntervalSetting)option_index;
+      if (_display_off_active_()) {
+        active_metric_ = dashboard::Metric::None;
+      }
+      break;
+    case SettingChoiceKind::PmInterval:
+      ui_settings_.pm_interval = (IntervalSetting)option_index;
+      break;
+    case SettingChoiceKind::OtherSensorInterval:
+      ui_settings_.other_sensor_interval = (IntervalSetting)option_index;
+      break;
+    case SettingChoiceKind::GpsMode:
+      ui_settings_.gps_mode = (GpsModeSetting)option_index;
+      break;
+    case SettingChoiceKind::Mode:
+      ui_settings_.mode = (DeviceModeSetting)option_index;
+      _apply_mode_runtime_();
+      break;
+    case SettingChoiceKind::AutoLock:
+      switch (option_index) {
+      case 0:
+        ui_settings_.auto_lock = AutoLockSetting::Off;
+        break;
+      case 1:
+        ui_settings_.auto_lock = AutoLockSetting::TenSeconds;
+        break;
+      case 2:
+        ui_settings_.auto_lock = AutoLockSetting::ThirtySeconds;
+        break;
+      case 3:
+      default:
+        ui_settings_.auto_lock = AutoLockSetting::SixtySeconds;
+        break;
+      }
+      break;
+    case SettingChoiceKind::None:
+    default:
+      break;
+    }
+    normalize_ui_settings(&ui_settings_);
+    save_ui_settings(ui_settings_);
+    ui_screen_ = dashboard::Screen::Settings;
+    settings_choice_index_ = 1;
+    settings_choice_scroll_ = 0;
+    choice_kind_ = SettingChoiceKind::None;
+  }
+
+  void _move_main_menu_(int delta) {
+    const bool add_tag_disabled = _state != State::Tracking;
+    int next = (int)main_menu_index_;
+    do {
+      next = (next + delta + 5) % 5;
+    } while (add_tag_disabled && next == 2);
+    main_menu_index_ = (uint8_t)next;
+  }
+
+  void _move_settings_(int delta) {
+    int next = (int)settings_index_ + delta;
+    if (next < 0) {
+      next = 0;
+    }
+    if (next > 10) {
+      next = 10;
+    }
+    settings_index_ = (uint8_t)next;
+  }
+
+  void _move_tag_list_(int delta) {
+    int next = (int)tag_index_ + delta;
+    if (next < 0) {
+      next = 0;
+    }
+    if (next > 11) {
+      next = 11;
+    }
+    tag_index_ = (uint8_t)next;
+  }
+
+  void _move_settings_choice_(int delta) {
+    const int total = 2 + (int)_setting_choice_option_count_();
+    if (total <= 0) {
+      settings_choice_index_ = 1;
+      return;
+    }
+    settings_choice_index_ = (uint8_t)(((int)settings_choice_index_ + delta + total) % total);
+    _sync_choice_scroll_();
+  }
+
+  void _move_about_(int delta) { about_index_ = (uint8_t)(((int)about_index_ + delta + 2) % 2); }
+
+  void _move_confirm_(int delta) {
+    confirm_index_ = (uint8_t)(((int)confirm_index_ + delta + 5) % 5);
+  }
+
+  const char *_selected_tag_label_(void) const {
+    static const char *tags[] = {
+        "Traffic Emissions", "Road Dust",         "Construction Work", "Biomass Burning",
+        "Garbage Burning",   "Factory Emissions", "Smoking/Vaping",    "Cooking",
+        "Paint/Solvents",    "Other Pollution",
+    };
+    if (tag_index_ < 2 || tag_index_ > 11) {
+      return nullptr;
+    }
+    return tags[tag_index_ - 2];
+  }
+
+  void _check_auto_lock_(void) {
+    if (device_locked_) {
+      return;
+    }
+    if (!(_state == State::Idle || _state == State::Tracking)) {
+      return;
+    }
+    const uint32_t timeout_ms = _auto_lock_timeout_ms_();
+    if (timeout_ms == 0 || last_ui_interaction_ms_ == 0) {
+      return;
+    }
+    if ((now_ms() - last_ui_interaction_ms_) < timeout_ms) {
+      return;
+    }
+    _return_home_(true);
+    device_locked_ = true;
+    _show_snackbar_("Device auto-locked");
+    _dashboard_update_status_only_();
+  }
+
+  bool _activate_current_screen_(void) {
+    switch (ui_screen_) {
+    case dashboard::Screen::Home:
+      ui_screen_ = dashboard::Screen::MainMenu;
+      main_menu_index_ = 0;
+      return true;
+    case dashboard::Screen::MainMenu:
+      switch (main_menu_index_) {
+      case 0:
+        ui_screen_ = dashboard::Screen::Home;
+        return true;
+      case 1:
+        if (_state == State::Tracking) {
+          _transition(State::Idle);
+          _return_home_(false);
+          _show_snackbar_("Tracking stopped");
+        } else {
+          _start_new_tracking_session();
+          _transition(State::Tracking);
+          _return_home_(false);
+          _show_snackbar_("Tracking started");
+        }
+        return true;
+      case 2:
+        if (_state == State::Tracking) {
+          ui_screen_ = dashboard::Screen::TagList;
+          tag_index_ = 1;
+        }
+        return true;
+      case 3:
+        ui_screen_ = dashboard::Screen::Settings;
+        settings_index_ = 1;
+        return true;
+      case 4:
+      default:
+        ui_screen_ = dashboard::Screen::About;
+        about_index_ = 1;
+        return true;
+      }
+    case dashboard::Screen::Settings: {
+      if (settings_index_ == 0) {
+        _return_home_(false);
+        return true;
+      }
+      if (settings_index_ == 1) {
+        ui_screen_ = dashboard::Screen::MainMenu;
+        main_menu_index_ = 3;
+        return true;
+      }
+      if (settings_index_ == 10) {
+        ui_screen_ = dashboard::Screen::Confirm;
+        confirm_index_ = 1;
+        return true;
+      }
+      const SettingChoiceKind kind = _setting_choice_kind_for_index_(settings_index_);
+      if (kind != SettingChoiceKind::None) {
+        _open_choice_for_setting_(kind);
+      }
+      return true;
+    }
+    case dashboard::Screen::SettingsChoice:
+      if (settings_choice_index_ == 0) {
+        _return_home_(false);
+      } else if (settings_choice_index_ == 1) {
+        ui_screen_ = dashboard::Screen::Settings;
+      } else {
+        _apply_setting_choice_((uint8_t)(settings_choice_index_ - 2));
+      }
+      return true;
+    case dashboard::Screen::TagList:
+      if (tag_index_ == 0) {
+        _return_home_(false);
+      } else if (tag_index_ == 1) {
+        ui_screen_ = dashboard::Screen::MainMenu;
+        main_menu_index_ = 2;
+      } else {
+        const char *tag = _selected_tag_label_();
+        if (tag != nullptr) {
+          last_saved_tag_ = tag;
+          char message[48];
+          (void)snprintf(message, sizeof(message), "Tag '%s' saved", tag);
+          _return_home_(false);
+          _show_snackbar_(message);
+        }
+      }
+      return true;
+    case dashboard::Screen::About:
+      if (about_index_ == 0) {
+        _return_home_(false);
+      } else {
+        ui_screen_ = dashboard::Screen::MainMenu;
+        main_menu_index_ = 4;
+      }
+      return true;
+    case dashboard::Screen::Confirm:
+      if (confirm_index_ == 0) {
+        _return_home_(false);
+      } else if (confirm_index_ == 1 || confirm_index_ == 3) {
+        ui_screen_ = dashboard::Screen::Settings;
+        settings_index_ = 10;
+      } else if (confirm_index_ == 4) {
+        if (_state == State::Tracking) {
+          _transition(State::Idle);
+        }
+        _clear_tracking_logs();
+        last_saved_tag_.clear();
+        _return_home_(true);
+        _show_snackbar_("Data cleared");
+      }
+      return true;
+    case dashboard::Screen::Shutdown:
+      return false;
+    }
+    return false;
+  }
+
+  bool _handle_ui_inputs_(const Inputs &in) {
+    if (!(_state == State::Idle || _state == State::Tracking)) {
+      return false;
+    }
+
+    if (in.touch_enter_long) {
+      _toggle_lock_();
+      return true;
+    }
+
+    const bool left = in.touch_left_short;
+    const bool right = in.touch_right_short;
+    const bool menu = in.touch_enter_short;
+    if (!left && !right && !menu) {
+      return false;
+    }
+
+    if (device_locked_) {
+      _show_snackbar_("Long press Menu 2s to unlock");
+      _dashboard_update_status_only_();
+      return true;
+    }
+
+    if (ui_screen_ == dashboard::Screen::Home) {
+      if (menu) {
+        _mark_ui_interaction_();
+        ui_screen_ = dashboard::Screen::MainMenu;
+        main_menu_index_ = 0;
+      } else if (!_display_off_active_()) {
+        _mark_ui_interaction_();
+        if (left) {
+          _browse_metric_(-1);
+        }
+        if (right) {
+          _browse_metric_(1);
+        }
+      }
+      _dashboard_update_status_only_();
+      return true;
+    }
+
+    if (ui_screen_ == dashboard::Screen::MainMenu) {
+      _mark_ui_interaction_();
+      if (left) {
+        _move_main_menu_(-1);
+      }
+      if (right) {
+        _move_main_menu_(1);
+      }
+      if (menu) {
+        (void)_activate_current_screen_();
+      }
+      _dashboard_update_status_only_();
+      return true;
+    }
+
+    if (ui_screen_ == dashboard::Screen::Settings) {
+      _mark_ui_interaction_();
+      if (left) {
+        _move_settings_(-1);
+      }
+      if (right) {
+        _move_settings_(1);
+      }
+      if (menu) {
+        (void)_activate_current_screen_();
+      }
+      _dashboard_update_status_only_();
+      return true;
+    }
+
+    if (ui_screen_ == dashboard::Screen::SettingsChoice) {
+      _mark_ui_interaction_();
+      if (left) {
+        _move_settings_choice_(-1);
+      }
+      if (right) {
+        _move_settings_choice_(1);
+      }
+      if (menu) {
+        (void)_activate_current_screen_();
+      }
+      _dashboard_update_status_only_();
+      return true;
+    }
+
+    if (ui_screen_ == dashboard::Screen::TagList) {
+      _mark_ui_interaction_();
+      if (left) {
+        _move_tag_list_(-1);
+      }
+      if (right) {
+        _move_tag_list_(1);
+      }
+      if (menu) {
+        (void)_activate_current_screen_();
+      }
+      _dashboard_update_status_only_();
+      return true;
+    }
+
+    if (ui_screen_ == dashboard::Screen::About) {
+      _mark_ui_interaction_();
+      if (left) {
+        _move_about_(-1);
+      }
+      if (right) {
+        _move_about_(1);
+      }
+      if (menu) {
+        (void)_activate_current_screen_();
+      }
+      _dashboard_update_status_only_();
+      return true;
+    }
+
+    if (ui_screen_ == dashboard::Screen::Confirm) {
+      _mark_ui_interaction_();
+      if (left) {
+        _move_confirm_(-1);
+      }
+      if (right) {
+        _move_confirm_(1);
+      }
+      if (menu) {
+        (void)_activate_current_screen_();
+      }
+      _dashboard_update_status_only_();
+      return true;
+    }
+
+    return false;
   }
 
   void _clear_tracking_logs(void) {
@@ -1671,6 +2941,8 @@ private:
       _state_shutdown(in);
       break;
     }
+
+    _check_auto_lock_();
   }
 
   void _transition(State next) {
@@ -1687,7 +2959,9 @@ private:
       _ble_notify_status_now(State::Sync);
       ble_->stop();
     } else if (ble_ != nullptr && prev == State::Sync) {
-      (void)ble_->start(ble_device_name_.c_str());
+      if (ui_settings_.mode == DeviceModeSetting::Portable) {
+        (void)ble_->start(ble_device_name_.c_str());
+      }
     }
 
     ESP_LOGI(GO_TAG, "state %s -> %s", state_name(_state), state_name(next));
@@ -1723,21 +2997,10 @@ private:
   void _state_idle(const Inputs &in) {
     _kick_watchdogs_if_needed();
 
-    // Transitions from diagram.
-    if (in.touch_right_long) {
-      _start_new_tracking_session();
-      _transition(State::Tracking);
+    if (_handle_ui_inputs_(in)) {
       return;
     }
-    // NOTE: touch_enter_long intentionally ignored (SYNC temporarily disabled from touch).
-    // if (in.touch_enter_long) {
-    //   _transition(State::Sync);
-    //   return;
-    // }
-    if (in.boot_long) {
-      _clear_tracking_logs();
-      return;
-    }
+
     if (in.button_long) {
       _transition(State::Shutdown);
       return;
@@ -1761,8 +3024,12 @@ private:
     if (_last_idle_measure_ms == 0) {
       _last_idle_measure_ms = now_ms();
     }
+    const uint32_t configured_interval_ms = interval_setting_to_ms(ui_settings_.display_interval);
+    const uint32_t measure_interval_ms = configured_interval_ms != 0
+                                             ? configured_interval_ms
+                                             : (uint32_t)GO_IDLE_MEASURE_INTERVAL_MS;
     const uint32_t measure_elapsed_ms = now_ms() - _last_idle_measure_ms;
-    if (measure_elapsed_ms >= (uint32_t)GO_IDLE_MEASURE_INTERVAL_MS) {
+    if (measure_elapsed_ms >= measure_interval_ms) {
       _idle_measure_and_display();
       _last_idle_measure_ms = now_ms();
     }
@@ -1858,7 +3125,8 @@ private:
         changed = true;
         ESP_LOGW(GO_TAG, "BQ25629 recovery: re-enabled charging");
       } else {
-        ESP_LOGW(GO_TAG, "BQ25629 recovery: enable_charging(true) failed: %s", esp_err_to_name(err));
+        ESP_LOGW(GO_TAG, "BQ25629 recovery: enable_charging(true) failed: %s",
+                 esp_err_to_name(err));
       }
     }
 
@@ -2060,16 +3328,12 @@ private:
   }
 
   void _state_tracking(const Inputs &in) {
-    // TRACKING: boot -> measure -> save -> display -> sleep.
-    // Diagram: touch (long) toggles back to IDLE.
-    if (in.touch_right_long) {
-#if NO_INACTIVE_NO_SLEEP == 1
-      // In dev mode we don't reboot between modes, but TRACKING deep-sleeps the panel after
-      // full_refresh(). Ensure we wake and restore basemap prerequisites before switching to
-      // IDLE (which uses partial refresh).
-      _dashboard_update_status_only_();
-#endif
-      _transition(State::Idle);
+    if (_handle_ui_inputs_(in)) {
+      return;
+    }
+
+    if (in.button_long) {
+      _transition(State::Shutdown);
       return;
     }
 
@@ -2109,6 +3373,8 @@ private:
   void _shutdown_now(void) {
     ESP_LOGI(GO_TAG, "shutdown: begin");
 
+    _return_home_(true);
+
     if (ble_ != nullptr) {
       ble_->stop();
     }
@@ -2140,8 +3406,12 @@ private:
       }
     }
 
-    // Put the panel to sleep.
+    // Show shutdown screen, then blank the panel.
     if (dash_ != nullptr) {
+      ui_screen_ = dashboard::Screen::Shutdown;
+      _dashboard_update_status_only_();
+      sleep_ms(1500);
+
       ESP_LOGI(GO_TAG, "shutdown: display clear");
       const uint32_t t0 = now_ms();
       dash_->clear();
@@ -2335,47 +3605,29 @@ private:
 
     _sample_battery_percent();
 
-    if (dash_ != nullptr) {
-      dashboard::Values v = dash_values_;
-      v.status_mask = _dashboard_status_mask_(gps_ok, d);
-
-      if (gps_ok && d.utc.time_valid) {
-        utc_to_local_hm(d.utc.hour, d.utc.min, 7, &v.hour, &v.minute);
-      }
-
-      if (pm.is_pm_25_valid()) {
-        v.pm25_ugm3 = pm.pm_25;
-      }
-
-      // Display CO2 from SCD4x when initialized
-      if (scd4x_ != nullptr && scd4x_->initialized) {
-        v.co2_ppm = scd4x_last_valid_ ? (int)scd4x_last_ppm_ : MeasuresInvalid::CO2;
-      } else if (co2_valid) {
-        v.co2_ppm = co2.co2;
-      }
-      if (th_temp_valid) {
-        v.temperature_c = th.temperature;
-      }
-      if (th_hum_valid) {
-        v.humidity_pct = (int)lroundf(th.humidity);
-      }
-
-      if (battery_percent_ok_) {
-        const int bp = (battery_percent_ < 0) ? 0 : ((battery_percent_ > 100) ? 100 : battery_percent_);
-        v.battery_pct = (uint8_t)bp;
-      }
-      if (charger_ != nullptr) {
-        bool ch = false;
-        if (charger_->is_charging(ch) == ESP_OK) {
-          v.is_battery_charging = ch;
-        }
-      }
-
-      dash_->update(v);
-      dash_values_ = v;
+    dash_values_.pm25_ugm3 = pm.is_pm_25_valid() ? pm.pm_25 : MeasuresInvalid::PM;
+    if (scd4x_ != nullptr && scd4x_->initialized) {
+      dash_values_.co2_ppm = scd4x_last_valid_ ? (int)scd4x_last_ppm_ : MeasuresInvalid::CO2;
+    } else {
+      dash_values_.co2_ppm = co2_valid ? co2.co2 : MeasuresInvalid::CO2;
     }
+    dash_values_.temperature_c = th_temp_valid ? th.temperature : MeasuresInvalid::TEMPERATURE;
+    dash_values_.humidity_pct = th_hum_valid ? th.humidity : MeasuresInvalid::HUMIDITY;
+    dash_values_.tvoc_raw = tvoc_valid ? (float)gas.tvoc_raw : (float)MeasuresInvalid::TVOC;
+    dash_values_.nox_raw = nox_valid ? (float)gas.nox_raw : (float)MeasuresInvalid::NOX;
+    dash_values_.pressure_hpa = pressure_valid ? (float)(dps.pressure_pa / 100.0f) : -1.0f;
+    dash_values_.altitude_m =
+        pressure_valid ? pressure_to_altitude_m(dash_values_.pressure_hpa) : -1.0f;
+    _push_history_(dashboard::Metric::Pm25, dash_values_.pm25_ugm3);
+    _push_history_(dashboard::Metric::Co2, (float)dash_values_.co2_ppm);
+    _push_history_(dashboard::Metric::Temp, dash_values_.temperature_c);
+    _push_history_(dashboard::Metric::Humidity, dash_values_.humidity_pct);
+    _push_history_(dashboard::Metric::Tvoc, dash_values_.tvoc_raw);
+    _push_history_(dashboard::Metric::Nox, dash_values_.nox_raw);
+    _dashboard_update_status_only_();
 
-    if (ble_ != nullptr && ble_->is_running() && (ble_->measures_subscribed() || ble_->status_subscribed())) {
+    if (ble_ != nullptr && ble_->is_running() &&
+        (ble_->measures_subscribed() || ble_->status_subscribed())) {
       NandStorageService::Record rec;
       rec.id = tracking_session_id_;
 
@@ -2877,45 +4129,26 @@ private:
 
     _sample_battery_percent();
 
-    if (dash_ != nullptr) {
-      dashboard::Values v = dash_values_;
-      v.status_mask = _dashboard_status_mask_(gps_ok, d);
-
-      if (gps_ok && d.utc.time_valid) {
-        utc_to_local_hm(d.utc.hour, d.utc.min, 7, &v.hour, &v.minute);
-      }
-
-      if (pm.is_pm_25_valid()) {
-        v.pm25_ugm3 = pm.pm_25;
-      }
-
-      // Display CO2 from SCD4x when initialized
-      if (scd4x_ != nullptr && scd4x_->initialized) {
-        v.co2_ppm = scd4x_last_valid_ ? (int)scd4x_last_ppm_ : MeasuresInvalid::CO2;
-      } else if (co2_valid) {
-        v.co2_ppm = co2.co2;
-      }
-      if (th_temp_valid) {
-        v.temperature_c = th.temperature;
-      }
-      if (th_hum_valid) {
-        v.humidity_pct = (int)lroundf(th.humidity);
-      }
-
-      if (battery_percent_ok_) {
-        const int bp = (battery_percent_ < 0) ? 0 : ((battery_percent_ > 100) ? 100 : battery_percent_);
-        v.battery_pct = (uint8_t)bp;
-      }
-      if (charger_ != nullptr) {
-        bool ch = false;
-        if (charger_->is_charging(ch) == ESP_OK) {
-          v.is_battery_charging = ch;
-        }
-      }
-
-      dash_->update(v);
-      dash_values_ = v;
+    dash_values_.pm25_ugm3 = pm.is_pm_25_valid() ? pm.pm_25 : MeasuresInvalid::PM;
+    if (scd4x_ != nullptr && scd4x_->initialized) {
+      dash_values_.co2_ppm = scd4x_last_valid_ ? (int)scd4x_last_ppm_ : MeasuresInvalid::CO2;
+    } else {
+      dash_values_.co2_ppm = co2_valid ? co2.co2 : MeasuresInvalid::CO2;
     }
+    dash_values_.temperature_c = th_temp_valid ? th.temperature : MeasuresInvalid::TEMPERATURE;
+    dash_values_.humidity_pct = th_hum_valid ? th.humidity : MeasuresInvalid::HUMIDITY;
+    dash_values_.tvoc_raw = tvoc_valid ? (float)gas.tvoc_raw : (float)MeasuresInvalid::TVOC;
+    dash_values_.nox_raw = nox_valid ? (float)gas.nox_raw : (float)MeasuresInvalid::NOX;
+    dash_values_.pressure_hpa = pressure_valid ? (float)(dps.pressure_pa / 100.0f) : -1.0f;
+    dash_values_.altitude_m =
+        pressure_valid ? pressure_to_altitude_m(dash_values_.pressure_hpa) : -1.0f;
+    _push_history_(dashboard::Metric::Pm25, dash_values_.pm25_ugm3);
+    _push_history_(dashboard::Metric::Co2, (float)dash_values_.co2_ppm);
+    _push_history_(dashboard::Metric::Temp, dash_values_.temperature_c);
+    _push_history_(dashboard::Metric::Humidity, dash_values_.humidity_pct);
+    _push_history_(dashboard::Metric::Tvoc, dash_values_.tvoc_raw);
+    _push_history_(dashboard::Metric::Nox, dash_values_.nox_raw);
+    _dashboard_update_status_only_();
 
 #if TRACKING_DISPLAY_SLEEP == 1
     if (dash_ != nullptr) {
@@ -3089,6 +4322,13 @@ extern "C" void app_main(void) {
   esp_log_level_set(GO_TAG, ESP_LOG_INFO);
   sleep_ms(GO_BOOT_DELAY_MS);
 
+  esp_err_t nvs_err = nvs_flash_init();
+  if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    nvs_err = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(nvs_err);
+
   ESP_ERROR_CHECK(init_ext_watchdog());
   reset_ext_watchdog();
   const uint32_t wdt_last_reset_ms = now_ms();
@@ -3173,8 +4413,10 @@ extern "C" void app_main(void) {
           err = sunrise_i2c_read_config(&sunrise, &mode, &period_ms);
           if (err == ESP_OK) {
             sunrise_ptr = &sunrise;
-            ESP_LOGI(GO_TAG, "Sunlight detected (test-only; BLE field name 'sunlight') mode=%u period_ms=%d",
-                     (unsigned)mode, period_ms);
+            ESP_LOGI(
+                GO_TAG,
+                "Sunlight detected (test-only; BLE field name 'sunlight') mode=%u period_ms=%d",
+                (unsigned)mode, period_ms);
           } else {
             ESP_LOGW(GO_TAG, "Sunlight detect failed: %s", esp_err_to_name(err));
             sunrise_i2c_destroy(&sunrise);
@@ -3240,25 +4482,12 @@ extern "C" void app_main(void) {
   dashboard::Dashboard *dash_ptr = nullptr;
   {
     constexpr dashboard::display_driver::Config display_cfg{
-        GO_SPI_HOST,
-        GO_EPD_CLOCK_SPEED_HZ,
-        0,
-        GO_EPD_CS_GPIO,
-        GO_EPD_DC_GPIO,
-        GO_EPD_RST_GPIO,
-        GO_EPD_BUSY_GPIO,
+        GO_SPI_HOST,     GO_EPD_CLOCK_SPEED_HZ, 0, GO_EPD_CS_GPIO, GO_EPD_DC_GPIO,
+        GO_EPD_RST_GPIO, GO_EPD_BUSY_GPIO,
     };
     static dashboard::Dashboard dash(dashboard::Config{20, display_cfg});
 
-    dashboard::Values v{MeasuresInvalid::CO2,
-                        MeasuresInvalid::PM,
-                        MeasuresInvalid::TEMPERATURE,
-                        (int)MeasuresInvalid::HUMIDITY,
-                        0xFF,
-                        0xFF,
-                        0xFF,
-                        false,
-                        0};
+    dashboard::Values v{};
     if (charger_ptr != nullptr) {
       bool ch = false;
       if (charger_ptr->is_charging(ch) == ESP_OK) {
@@ -3370,8 +4599,7 @@ extern "C" void app_main(void) {
   static BLEStream ble;
   GoController go(&buttons, input_queue, pm_sensor_ptr, tvoc_nox_sensor_ptr, co2_sensor_ptr,
                   dps368_ptr, scd4x_ptr, s12_ptr, sunrise_ptr, &ble, bus_handle, gps_ptr, dash_ptr,
-                  storage_ptr,
-                  charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
+                  storage_ptr, charger_ptr, wdt_last_reset_ms, bq_wdt_last_reset_ms);
   ESP_ERROR_CHECK(
       esp_event_handler_register(BUTTON_SERVICE_EVENT, ESP_EVENT_ANY_ID, &on_button_event, &go));
 

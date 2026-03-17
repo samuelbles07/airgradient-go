@@ -19,6 +19,8 @@ set (
     bq25629
     CO2Sensor
     embedded-i2c-scd4x
+    nvs_flash
+    app_update
 )
 
 set(srcs

@@ -104,7 +104,7 @@ static constexpr bool GO_TOUCH_REQUIRED = false;
 
 // Button service behavior.
 static constexpr uint32_t GO_BUTTON_DEBOUNCE_MS = 200;
-static constexpr uint32_t GO_BUTTON_LONG_PRESS_MS = 2500;
+static constexpr uint32_t GO_BUTTON_LONG_PRESS_MS = 2000;
 
 // Touch button mapping (CAP1203): 0=CS1 (Right), 1=CS2 (Left), 2=CS3 (Enter).
 static constexpr uint8_t GO_TOUCH_RIGHT_ID = 0;
