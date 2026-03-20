@@ -1601,7 +1601,7 @@ private:
     v.locked = device_locked_;
     v.ble_enabled = ui_settings_.mode == DeviceModeSetting::Portable;
     v.ble_connected = v.ble_enabled && ble_ != nullptr && ble_->is_connected();
-    v.wifi_enabled = ui_settings_.mode == DeviceModeSetting::Stationary;
+    v.wifi_enabled = false;
     v.gps_enabled = _gps_icon_enabled_();
     v.gps_fix = v.gps_enabled && gps_ok && d.fix_valid;
     v.tracking_active = _state == State::Tracking;
