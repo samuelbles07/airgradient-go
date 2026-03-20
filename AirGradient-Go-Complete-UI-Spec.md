@@ -80,7 +80,7 @@ The current external firmware repo already provides these foundations:
 4. BLE streaming and config writes
 5. GPS service
 6. NAND storage
-7. Device states: `IDLE`, `INACTIVE`, `SYNC`, `TRACKING`, `SHUTDOWN`
+7. Device states: `IDLE`, `INACTIVE`, `TRACKING`, `SHUTDOWN`
 
 What the firmware repo currently does not yet provide as a complete on-device IA:
 
@@ -287,15 +287,13 @@ Firmware runtime states remain:
 
 1. `IDLE`
 2. `INACTIVE`
-3. `SYNC`
-4. `TRACKING`
-5. `SHUTDOWN`
+3. `TRACKING`
+4. `SHUTDOWN`
 
 Recommended mapping:
 
 1. In normal powered-on use, the on-screen UI runs while the device is in `IDLE` or `TRACKING`
-2. During `SYNC`, the UI should either remain on the home screen with sync status visible or temporarily limit interactions if required by implementation
-3. `SHUTDOWN` should show the shutdown screen before the display is cleared or put to sleep
+2. `SHUTDOWN` should show the shutdown screen before the display is cleared or put to sleep
 
 ## 7. Global Interaction Rules
 
@@ -2046,7 +2044,6 @@ This appendix is a proposed runtime/interaction contract for review.
 | --- | --- | --- | --- | --- |
 | `IDLE` | full home UI | yes | yes | default interactive state |
 | `TRACKING` | full home UI | yes | yes | tracking icon active; `Add Tag` enabled |
-| `SYNC` | home dashboard with sync status | proposed: no navigation | proposed: no | keep screen readable, block conflicting interactions |
 | `INACTIVE` | blank / low-power display | wake only | no | wake returns to `IDLE` |
 | `SHUTDOWN` | shutdown screen, then blank | no | no | no interaction accepted |
 
@@ -2071,17 +2068,6 @@ This appendix is a proposed runtime/interaction contract for review.
 | Menu/list screen, locked | snackbar | snackbar | snackbar | unlock |
 | Shutdown screen | ignored | ignored | ignored | ignored |
 | Powered off | ignored | ignored | ignored | ignored |
-
-### C.4 Sync State Proposal
-
-Because the current firmware may block other work during sync:
-
-1. During active sync, show the dashboard with sync indicator visible
-2. Ignore `Left`, `Right`, and `Menu` short presses
-3. Ignore `Menu` long press during the critical blocking sync section
-4. Return to `IDLE` home UI when sync completes
-
-If product wants sync to remain interactive later, that should be specified as a separate change.
 
 ## Appendix D. List Screen Rendering Contract
 

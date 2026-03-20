@@ -373,9 +373,6 @@ static void draw_status_bar(u8g2_t *u8g2, const Values &values) {
       u8g2_DrawDisc(u8g2, 75, 6, 1, U8G2_DRAW_ALL);
     }
   }
-  if (values.sync_active) {
-    draw_text(u8g2, 82, 10, "SYNC");
-  }
   if (values.tracking_active) {
     draw_tracking_dot(u8g2);
   }
@@ -674,8 +671,7 @@ bool Dashboard::_is_header_changed(const Values &next) const {
          _values.is_battery_charging != next.is_battery_charging || _values.locked != next.locked ||
          _values.ble_enabled != next.ble_enabled || _values.ble_connected != next.ble_connected ||
          _values.wifi_enabled != next.wifi_enabled || _values.gps_enabled != next.gps_enabled ||
-         _values.gps_fix != next.gps_fix || _values.tracking_active != next.tracking_active ||
-         _values.sync_active != next.sync_active;
+         _values.gps_fix != next.gps_fix || _values.tracking_active != next.tracking_active;
 }
 
 void Dashboard::deep_sleep() {

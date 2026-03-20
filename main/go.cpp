@@ -2,15 +2,12 @@
 #include <stdint.h>
 
 #include "esp_mac.h"
-#include <memory>
-#include <new>
 #include <string>
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 #include <fcntl.h>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -19,10 +16,10 @@
 #include "esp_event.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
-#include "esp_http_client.h"
 #include "esp_console.h"
 #include "esp_vfs_fat.h"
 #include "cJSON.h"
@@ -43,7 +40,6 @@
 #include "go_constants.h"
 #include "utils.hpp"
 #include "ble_stream.h"
-#include "WiFiManager.h"
 #include "bq25629.h"
 
 #include "dashboard/dashboard.h"
@@ -75,7 +71,6 @@ extern "C" {
 enum class State {
   Idle = 0,
   Inactive,
-  Sync,
   Tracking,
   Shutdown,
 };
@@ -87,13 +82,11 @@ struct Scd4xTest {
 RTC_DATA_ATTR static State RTC_LAST_STATE = State::Idle;
 RTC_DATA_ATTR static uint32_t RTC_TRACKING_SESSION_ID = 0;
 RTC_DATA_ATTR static uint32_t RTC_TRACKING_SLEEP_INTERVAL_S = GO_TRACKING_SLEEP_INTERVAL_S;
-static WiFiManager g_wifiManager;
 
 static bool is_valid_rtc_state(State s) {
   switch (s) {
   case State::Idle:
   case State::Inactive:
-  case State::Sync:
   case State::Tracking:
   case State::Shutdown:
     return true;
@@ -423,8 +416,6 @@ static void reset_ext_watchdog(void) {
   (void)gpio_set_level(GO_WDT_GPIO, 0);
 }
 
-// Forward declaration (defined later in this file).
-static void format_rfc3339_utc(uint64_t epoch_ms, char *out, size_t out_len);
 static const char *state_name(State s);
 
 static std::string build_ble_measure_payload(const NandStorageService::Record &r) {
@@ -656,70 +647,6 @@ static std::string build_ble_status_payload(State s, bool gps_ok, const GPSServi
   return out;
 }
 
-static std::string build_measures_payload(const NandStorageService::Record *recs,
-                                          const uint64_t *ts_ms, uint32_t n) {
-  if (recs == nullptr || ts_ms == nullptr || n == 0) {
-    return {};
-  }
-
-  cJSON *root = cJSON_CreateObject();
-  cJSON *arr = cJSON_CreateArray();
-  cJSON_AddItemToObject(root, "measures", arr);
-
-  for (uint32_t i = 0; i < n; ++i) {
-    cJSON *m = cJSON_CreateObject();
-    char date[32];
-    format_rfc3339_utc(ts_ms[i], date, sizeof(date));
-    cJSON_AddStringToObject(m, "date", date);
-
-    if (recs[i].latitude_e7 != INT32_MIN && recs[i].longitude_e7 != INT32_MIN) {
-      cJSON_AddNumberToObject(m, "lat", (double)recs[i].latitude_e7 / 10000000.0);
-      cJSON_AddNumberToObject(m, "lng", (double)recs[i].longitude_e7 / 10000000.0);
-    }
-
-    // PM mass (atmospheric)
-    go_utils::json_add_u16_x10_if_valid(m, "pm01", recs[i].pm01_ugm3_x10);
-    go_utils::json_add_u16_x10_if_valid(m, "pm02", recs[i].pm25_ugm3_x10);
-    go_utils::json_add_u16_x10_if_valid(m, "pm10", recs[i].pm10_ugm3_x10);
-
-    // PM counts / bins
-    go_utils::json_add_u32_x10_if_valid(m, "pm005Count", recs[i].pc05_x10);
-    go_utils::json_add_u32_x10_if_valid(m, "pm01Count", recs[i].pc10_x10);
-    go_utils::json_add_u32_x10_if_valid(m, "pm02Count", recs[i].pc25_x10);
-    go_utils::json_add_u32_x10_if_valid(m, "pm10Count", recs[i].pc100_x10);
-
-    // Temporary server mapping: SCD4x CO2 is posted as pm003Count
-    go_utils::json_add_u16_if_valid(m, "pm003Count", recs[i].scd4x);
-
-    // Senseair I2C CO2 (temporary field names).
-    go_utils::json_add_u16_if_valid(m, "s12", recs[i].s12);
-    go_utils::json_add_u16_if_valid(m, "sunlight", recs[i].sunlight);
-
-    go_utils::json_add_u16_if_valid(m, "rco2", recs[i].co2_ppm);
-    go_utils::json_add_i16_x100_if_valid(m, "atmp", recs[i].temperature_c_x100);
-    go_utils::json_add_u16_x100_if_valid(m, "rhum", recs[i].humidity_rh_x100);
-
-    if (recs[i].pressure_pa != 0xFFFFFFFFu) {
-      cJSON_AddNumberToObject(m, "pres", (double)recs[i].pressure_pa / 100.0);
-    }
-
-    go_utils::json_add_u16_if_valid(m, "tvocRaw", recs[i].tvoc_raw);
-    go_utils::json_add_u16_if_valid(m, "noxRaw", recs[i].nox_raw);
-
-    cJSON_AddNumberToObject(m, "route", (double)recs[i].id);
-    cJSON_AddItemToArray(arr, m);
-  }
-
-  char *json = cJSON_PrintUnformatted(root);
-  std::string payload;
-  if (json != nullptr) {
-    payload.assign(json);
-    cJSON_free(json);
-  }
-  cJSON_Delete(root);
-  return payload;
-}
-
 static bool utc_to_epoch_ms(const GPSService::UtcTime &utc, uint64_t *out_ms) {
   if (out_ms == nullptr) {
     return false;
@@ -775,32 +702,12 @@ static bool utc_to_epoch_ms(const GPSService::UtcTime &utc, uint64_t *out_ms) {
   return true;
 }
 
-static void format_rfc3339_utc(uint64_t epoch_ms, char *out, size_t out_len) {
-  if (out == nullptr || out_len == 0) {
-    return;
-  }
-  out[0] = '\0';
-
-  const time_t sec = (time_t)(epoch_ms / 1000ULL);
-  struct tm tm_utc;
-  memset(&tm_utc, 0, sizeof(tm_utc));
-  if (gmtime_r(&sec, &tm_utc) == nullptr) {
-    (void)snprintf(out, out_len, "1970-01-01T00:00:00Z");
-    return;
-  }
-
-  (void)snprintf(out, out_len, "%04d-%02d-%02dT%02d:%02d:%02dZ", tm_utc.tm_year + 1900,
-                 tm_utc.tm_mon + 1, tm_utc.tm_mday, tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
-}
-
 static const char *state_name(State s) {
   switch (s) {
   case State::Idle:
     return "IDLE";
   case State::Inactive:
     return "INACTIVE";
-  case State::Sync:
-    return "SYNC";
   case State::Tracking:
     return "TRACKING";
   case State::Shutdown:
@@ -1054,69 +961,6 @@ static std::string buildSerialNumber() {
   return sn;
 }
 
-static bool wifi_connect(const std::string &sn) {
-  std::string ssid = std::string("airgradient-") + sn;
-  if (g_wifiManager.autoConnect(ssid.c_str(), "cleanair") == false) {
-    ESP_LOGE(GO_TAG, "Failed connect to WiFi");
-    return false;
-  }
-  return true;
-}
-
-void wifi_disconnect() { g_wifiManager.disconnect(true); }
-
-static bool post_request(const std::string &sn, const std::string &data) {
-  esp_http_client_config_t config = {};
-  char url[96] = {0};
-  (void)snprintf(url, sizeof(url), "http://hw.airgradient.com/sensors/airgradient:%s/measures",
-                 sn.c_str());
-  config.url = url;
-  config.method = HTTP_METHOD_POST;
-  config.cert_pem = nullptr;
-  config.timeout_ms = 10000;
-
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (client == nullptr) {
-    ESP_LOGW(GO_TAG, "http client init failed");
-    return false;
-  }
-
-  esp_http_client_set_header(client, "Content-Type", "application/json");
-  esp_http_client_set_post_field(client, data.c_str(), data.length());
-
-  const esp_err_t perr = esp_http_client_perform(client);
-  if (perr != ESP_OK) {
-    ESP_LOGW(GO_TAG, "http perform failed (%s)", esp_err_to_name(perr));
-    esp_http_client_cleanup(client);
-    return false;
-  }
-
-  const int responseCode = esp_http_client_get_status_code(client);
-  if (responseCode != 200 && responseCode != 201) {
-    static constexpr int MAX_LOG_BODY = 512;
-    char body[MAX_LOG_BODY + 1];
-    int total = 0;
-    while (total < MAX_LOG_BODY) {
-      const int n = esp_http_client_read(client, body + total, MAX_LOG_BODY - total);
-      if (n <= 0) {
-        break;
-      }
-      total += n;
-    }
-    body[total] = '\0';
-
-    if (total > 0) {
-      ESP_LOGW(GO_TAG, "http status=%d url=%s body=%s", responseCode, url, body);
-    } else {
-      ESP_LOGW(GO_TAG, "http status=%d url=%s (no body)", responseCode, url);
-    }
-  } else {
-    ESP_LOGI(GO_TAG, "http status=%d", responseCode);
-  }
-  esp_http_client_cleanup(client);
-  return (responseCode == 200 || responseCode == 201);
-}
-
 static void initConsole() {
   fflush(stdout);
   fsync(fileno(stdout));
@@ -1291,11 +1135,9 @@ private:
   uint32_t _state_enter_ms = 0;
   uint32_t _last_idle_measure_ms = 0;
   uint32_t _tracking_next_cycle_ms = 0;
-  bool _sync_started = false;
   bool _tracking_started = false;
   bool _shutdown_started = false;
   std::string _serial_number;
-  bool _sync_wifi_connected = false;
   bool charger_vbus_seen_ = false;
   bool usb_c_adapter_present_ = false;
   drivers::VBusStatus last_vbus_status_ = drivers::VBusStatus::NO_ADAPTER;
@@ -1821,7 +1663,6 @@ private:
     v.gps_enabled = _gps_icon_enabled_();
     v.gps_fix = v.gps_enabled && gps_ok && d.fix_valid;
     v.tracking_active = _state == State::Tracking;
-    v.sync_active = _state == State::Sync;
     v.display_off = _display_off_active_();
     v.use_fahrenheit = ui_settings_.units == UnitsMode::Fahrenheit;
     v.pm_use_usaqi = ui_settings_.pm_display == PmDisplayMode::Usaqi;
@@ -2277,8 +2118,7 @@ private:
     ESP_LOGI(GO_TAG, "wake cause=%d last=%s initial=%s", (int)cause, state_name(last),
              state_name(initial));
 
-    if (ble_ != nullptr && initial != State::Sync &&
-        ui_settings_.mode == DeviceModeSetting::Portable) {
+    if (ble_ != nullptr && ui_settings_.mode == DeviceModeSetting::Portable) {
       (void)ble_->start(ble_device_name_.c_str());
     }
     _transition(initial);
@@ -2330,7 +2170,7 @@ private:
     if (ble_ == nullptr) {
       return;
     }
-    if (ui_settings_.mode == DeviceModeSetting::Portable && _state != State::Sync) {
+    if (ui_settings_.mode == DeviceModeSetting::Portable) {
       (void)ble_->start(ble_device_name_.c_str());
     } else {
       ble_->stop();
@@ -2931,9 +2771,6 @@ private:
     case State::Inactive:
       _state_inactive(in);
       break;
-    case State::Sync:
-      _state_sync(in);
-      break;
     case State::Tracking:
       _state_tracking(in);
       break;
@@ -2950,20 +2787,6 @@ private:
       return;
     }
 
-    const State prev = _state;
-
-    // State transition should emit a status update if a client is subscribed.
-    // Special-case SYNC: BLE is stopped to avoid Wi-Fi conflicts, so send the
-    // SYNC state before stopping.
-    if (ble_ != nullptr && next == State::Sync) {
-      _ble_notify_status_now(State::Sync);
-      ble_->stop();
-    } else if (ble_ != nullptr && prev == State::Sync) {
-      if (ui_settings_.mode == DeviceModeSetting::Portable) {
-        (void)ble_->start(ble_device_name_.c_str());
-      }
-    }
-
     ESP_LOGI(GO_TAG, "state %s -> %s", state_name(_state), state_name(next));
     _state = next;
     _state_enter_ms = now_ms();
@@ -2972,12 +2795,8 @@ private:
 
     if (_state == State::Idle) {
       _last_idle_measure_ms = 0;
-      _sync_started = false;
       _tracking_started = false;
       _shutdown_started = false;
-    }
-    if (_state == State::Sync) {
-      _sync_started = false;
     }
     if (_state == State::Tracking) {
       _tracking_started = false;
@@ -2987,7 +2806,6 @@ private:
       _shutdown_started = false;
     }
 
-    // Best-effort immediate notify if subscribed (except SYNC which stopped BLE).
     _ble_status_notify_if_needed();
 
     // Best-effort: keep dashboard header icons in sync with state transitions.
@@ -3311,22 +3129,6 @@ private:
     _inactive_enter_deep_sleep();
   }
 
-  void _state_sync(const Inputs &in) {
-    (void)in;
-    // SYNC: connect to Wi-Fi and send stored data; then return to IDLE.
-    if (!_sync_started) {
-      _sync_started = true;
-      _sync_begin();
-    }
-
-    const bool finished = _sync_step();
-    if (finished) {
-      _sync_end();
-      _transition(State::Idle);
-      return;
-    }
-  }
-
   void _state_tracking(const Inputs &in) {
     if (_handle_ui_inputs_(in)) {
       return;
@@ -3389,12 +3191,6 @@ private:
       if (err != ESP_OK) {
         ESP_LOGW(GO_TAG, "shutdown: buttons pre_light_sleep failed: %s", esp_err_to_name(err));
       }
-    }
-
-    // Best-effort: disconnect Wi-Fi if it was enabled.
-    if (_sync_wifi_connected) {
-      wifi_disconnect();
-      _sync_wifi_connected = false;
     }
 
     // Flush queued storage writes.
@@ -3722,254 +3518,6 @@ private:
     (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
     RTC_LAST_STATE = State::Inactive;
     esp_deep_sleep_start();
-  }
-
-  void _sync_begin(void) {
-    ESP_LOGI(GO_TAG, "sync: begin");
-
-    _dashboard_update_status_only_();
-
-    _sync_wifi_connected = wifi_connect(_serial_number);
-    if (!_sync_wifi_connected) {
-      ESP_LOGW(GO_TAG, "sync: wifi connect failed");
-    }
-  }
-
-  bool _sync_step(void) {
-    if (!_sync_wifi_connected) {
-      ESP_LOGW(GO_TAG, "sync: wifi not connected");
-      return true;
-    }
-    if (storage_ == nullptr) {
-      ESP_LOGW(GO_TAG, "sync: storage not configured");
-      return true;
-    }
-    if (!storage_->is_ready()) {
-      ESP_LOGW(GO_TAG, "sync: storage not ready");
-      return true;
-    }
-
-    const TickType_t to = pdMS_TO_TICKS(GO_SYNC_CMD_TIMEOUT_MS);
-    const uint64_t interval_ms = (uint64_t)tracking_sleep_interval_s_ * 1000ULL;
-
-    uint32_t total = 0;
-    esp_err_t err = storage_->get_count_sync(&total, to);
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "sync: get_count failed: %s", esp_err_to_name(err));
-      return true;
-    }
-
-    if (total == 0) {
-      ESP_LOGI(GO_TAG, "sync: nothing to send");
-      return true;
-    }
-
-    ESP_LOGI(GO_TAG, "sync: total records=%" PRIu32, total);
-
-    std::unique_ptr<NandStorageService::Record[]> batch_buf(
-        new (std::nothrow) NandStorageService::Record[GO_SYNC_BATCH_MAX]);
-    std::unique_ptr<uint64_t[]> ts_buf(new (std::nothrow) uint64_t[GO_SYNC_BATCH_MAX]);
-    if (!batch_buf || !ts_buf) {
-      ESP_LOGW(GO_TAG, "sync: out of memory allocating batch buffers");
-      return true;
-    }
-
-    uint32_t idx = 0;
-    bool any_route_sent = false;
-
-    while (idx < total) {
-      NandStorageService::Record first;
-      uint32_t nread = 0;
-      err = storage_->read_range_sync(idx, &first, 1, &nread, to);
-      if (err != ESP_OK || nread != 1) {
-        ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", idx, esp_err_to_name(err));
-        ESP_LOGW(GO_TAG, "sync: failed; keeping log");
-        return true;
-      }
-
-      const uint32_t route_id = first.id;
-      uint32_t route_start = idx;
-      uint32_t route_end = route_start;
-
-      while (route_end < total) {
-        NandStorageService::Record r;
-        nread = 0;
-        err = storage_->read_range_sync(route_end, &r, 1, &nread, to);
-        if (err != ESP_OK || nread != 1) {
-          ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", route_end,
-                   esp_err_to_name(err));
-          ESP_LOGW(GO_TAG, "sync: failed; keeping log");
-          return true;
-        }
-        if (r.id != route_id) {
-          break;
-        }
-        route_end += 1;
-      }
-
-      ESP_LOGI(GO_TAG, "sync: route=%" PRIu32 " records=%" PRIu32, route_id,
-               route_end - route_start);
-
-      bool route_ok = true;
-
-      // Find the first non-zero GPS timestamp for this route so we can backfill earlier
-      // records that have timestamp_ms==0.
-      bool have_anchor = false;
-      uint32_t anchor_idx = 0;
-      uint64_t anchor_ts_ms = 0;
-      for (uint32_t probe = route_start; probe < route_end; ++probe) {
-        NandStorageService::Record r;
-        nread = 0;
-        err = storage_->read_range_sync(probe, &r, 1, &nread, to);
-        if (err != ESP_OK || nread != 1) {
-          ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", probe, esp_err_to_name(err));
-          ESP_LOGW(GO_TAG, "sync: failed; keeping log");
-          return true;
-        }
-        if (r.timestamp_ms != 0) {
-          have_anchor = true;
-          anchor_idx = probe;
-          anchor_ts_ms = r.timestamp_ms;
-          break;
-        }
-      }
-
-      if (!have_anchor) {
-        // No GPS time ever became valid for this route; we can't synthesize timestamps.
-        ESP_LOGW(GO_TAG, "sync: route=%" PRIu32 " has no timestamps; skipping", route_id);
-        route_ok = false;
-      }
-
-      uint64_t last_ts_ms = 0;
-      uint32_t cur = route_start;
-
-      while (route_ok && cur < route_end) {
-        NandStorageService::Record *batch = batch_buf.get();
-        uint64_t *ts_ms = ts_buf.get();
-        uint32_t n = 0;
-
-        while (n < GO_SYNC_BATCH_MAX && cur < route_end) {
-          NandStorageService::Record r;
-          nread = 0;
-          err = storage_->read_range_sync(cur, &r, 1, &nread, to);
-          if (err != ESP_OK || nread != 1) {
-            ESP_LOGW(GO_TAG, "sync: read failed at idx=%" PRIu32 ": %s", cur, esp_err_to_name(err));
-            ESP_LOGW(GO_TAG, "sync: failed; keeping log");
-            return true;
-          }
-
-          const uint32_t abs_idx = cur;
-          uint64_t t = r.timestamp_ms;
-          if (t == 0) {
-            if (last_ts_ms != 0) {
-              t = last_ts_ms + interval_ms;
-            } else if (abs_idx < anchor_idx) {
-              const uint32_t diff = anchor_idx - abs_idx;
-              const uint64_t backfill = (uint64_t)diff * interval_ms;
-              if (anchor_ts_ms <= backfill) {
-                t = 0;
-              } else {
-                t = anchor_ts_ms - backfill;
-              }
-            } else {
-              // abs_idx==anchor_idx should have had a non-zero timestamp.
-              t = 0;
-            }
-          }
-          if (t == 0) {
-            ESP_LOGW(GO_TAG, "sync: route=%" PRIu32 " idx=%" PRIu32 " timestamp unresolved",
-                     route_id, abs_idx);
-            route_ok = false;
-            break;
-          }
-          last_ts_ms = t;
-
-          batch[n] = r;
-          ts_ms[n] = t;
-          n += 1;
-          cur += 1;
-        }
-
-        if (!route_ok) {
-          break;
-        }
-        if (n == 0) {
-          break;
-        }
-
-        // Stable sort by timestamp ascending.
-        for (uint32_t i = 1; i < n; ++i) {
-          const NandStorageService::Record r = batch[i];
-          const uint64_t t = ts_ms[i];
-          uint32_t j = i;
-          while (j > 0 && ts_ms[j - 1] > t) {
-            batch[j] = batch[j - 1];
-            ts_ms[j] = ts_ms[j - 1];
-            j -= 1;
-          }
-          batch[j] = r;
-          ts_ms[j] = t;
-        }
-
-        const std::string payload = build_measures_payload(batch, ts_ms, n);
-
-        if (payload.empty()) {
-          ESP_LOGW(GO_TAG, "sync: json build failed");
-          route_ok = false;
-          break;
-        }
-
-        ESP_LOGI(GO_TAG, "sync: post route=%" PRIu32 " n=%" PRIu32, route_id, n);
-        if (!post_request(_serial_number, payload)) {
-          ESP_LOGW(GO_TAG, "sync: post failed; skipping route=%" PRIu32, route_id);
-          route_ok = false;
-          break;
-        }
-      }
-
-      if (route_ok) {
-        any_route_sent = true;
-        ESP_LOGI(GO_TAG, "sync: route=%" PRIu32 " ok", route_id);
-      }
-
-      idx = route_end;
-    }
-
-    if (!any_route_sent) {
-      ESP_LOGW(GO_TAG, "sync: no routes sent; keeping log");
-      return true;
-    }
-
-    err = storage_->clear_sync(to);
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "sync: clear failed: %s", esp_err_to_name(err));
-      return true;
-    }
-
-    ESP_LOGI(GO_TAG, "sync: cleared");
-    return true;
-  }
-
-  void _sync_end(void) {
-    // TODO: stop Wi-Fi / cleanup.
-    ESP_LOGI(GO_TAG, "sync: end");
-    if (_sync_wifi_connected) {
-      wifi_disconnect();
-      _sync_wifi_connected = false;
-    }
-
-    // SPS30 can get into a bad I2C state after long Wi-Fi operations.
-    // Best-effort: reinitialize only if it fails a read.
-    bool pm_ok = false;
-    if (pm_sensor_ != nullptr) {
-      PMData pm;
-      pm_ok = pm_sensor_->read(pm);
-    }
-    if (!pm_ok) {
-      _reinit_pm_sensor("sync end");
-    }
-
-    _dashboard_update_status_only_();
   }
 
   void _tracking_begin(void) {

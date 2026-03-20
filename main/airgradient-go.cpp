@@ -14,13 +14,11 @@
 #include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-#include "esp_http_client.h"
 
 #include "soc/gpio_num.h"
 #include "sps30.h"
 #include "gdey0213b74.h"
 #include "nand_storage_service.h"
-#include "WiFiManager.h"
 #include "button_service.h"
 
 #include "ui/dashboard_ui.h"
@@ -60,9 +58,6 @@ static bool init_sps30_sensor(i2c_master_bus_handle_t bus_handle);
 static void resetExtWatchdog();
 static void log_gps_data(const GPSService::Data &d);
 static void dump_all_storage_records(NandStorageService *storage);
-static bool wifi_connect(const std::string &sn);
-static void wifi_disconnect();
-static bool post_request(const std::string &sn, const std::string &data);
 static std::string buildSerialNumber();
 // static void prepare_light_sleep(i2c_master_bus_handle_t bus_handle);
 // static void post_light_sleep(i2c_master_bus_handle_t bus_handle);
@@ -117,7 +112,6 @@ static void on_button_event(void *arg, esp_event_base_t base, int32_t id, void *
 static NandStorageService storage;
 static uint32_t next_record_id = 0;
 static bool storage_logging_enabled = true;
-static WiFiManager g_wifiManager;
 sps30_handle_t sps30_handle;
 
 extern "C" void app_main(void) {
@@ -418,41 +412,6 @@ void dump_all_storage_records(NandStorageService *storage) {
     }
   }
   ESP_LOGI(TAG, "storage dump complete");
-}
-
-bool wifi_connect(const std::string &sn) {
-  std::string ssid = std::string("airgradient-") + sn;
-  if (g_wifiManager.autoConnect(ssid.c_str(), "cleanair") == false) {
-    ESP_LOGE(TAG, "Failed connect to WiFi");
-    return false;
-  }
-  return true;
-}
-
-void wifi_disconnect() { g_wifiManager.disconnect(true); }
-
-bool post_request(const std::string &sn, const std::string &data) {
-  esp_http_client_config_t config = {};
-  char url[80] = {0};
-  sprintf(url, "http://hw.airgradient.com/sensors/airgradient:%s/measures", sn.c_str());
-  config.url = url;
-  config.method = HTTP_METHOD_POST;
-  config.cert_pem = nullptr;
-  config.timeout_ms = 10000;
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-
-  esp_http_client_set_header(client, "Content-Type", "application/json");
-  esp_http_client_set_post_field(client, data.c_str(), data.length());
-
-  if (esp_http_client_perform(client) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed perform HTTP POST");
-    esp_http_client_cleanup(client);
-    return false;
-  }
-  int responseCode = esp_http_client_get_status_code(client);
-  esp_http_client_cleanup(client);
-
-  return (responseCode == 200 || responseCode == 201);
 }
 
 std::string buildSerialNumber() {

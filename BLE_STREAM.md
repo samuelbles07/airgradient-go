@@ -11,7 +11,6 @@ Implementation reference:
 
 - The device exposes a single custom GATT service with multiple characteristics.
 - Notifications are used to stream live measurements, device status, and (optionally) export stored history.
-- BLE is intentionally stopped during Wi-Fi sync (`SYNC` state) and restarted when leaving `SYNC`.
 - The firmware requests a larger MTU (best-effort): `NimBLEDevice::setMTU(256)`.
 
 ## Device Name / Advertising
@@ -177,7 +176,7 @@ function parseHistoryPayload(s):
 Format: JSON object.
 
 Core fields:
-- `state`: string enum: `IDLE`, `INACTIVE`, `SYNC`, `TRACKING`, `SHUTDOWN`
+- `state`: string enum: `IDLE`, `INACTIVE`, `TRACKING`, `SHUTDOWN`
 - `trackingSleepS`: number (seconds)
 
 Optional fields:

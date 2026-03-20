@@ -62,7 +62,6 @@ struct Values {
   bool gps_enabled = true;
   bool gps_fix = false;
   bool tracking_active = false;
-  bool sync_active = false;
   bool display_off = false;
   bool use_fahrenheit = false;
   bool pm_use_usaqi = false;

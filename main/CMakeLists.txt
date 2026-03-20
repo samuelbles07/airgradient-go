@@ -9,8 +9,6 @@ set (
     freertos
     libnmea
     spi_nand_flash
-    WiFiManager
-    esp_http_client
     cap1203
     esp_event
     esp_timer
@@ -21,6 +19,7 @@ set (
     embedded-i2c-scd4x
     nvs_flash
     app_update
+    json
 )
 
 set(srcs
