@@ -8,7 +8,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-#include <fcntl.h>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
@@ -18,13 +17,9 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
-#include "esp_sleep.h"
 #include "esp_timer.h"
-#include "esp_console.h"
 #include "esp_vfs_fat.h"
 #include "cJSON.h"
-#include "driver/usb_serial_jtag.h"
-#include "driver/usb_serial_jtag_vfs.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
 #include "nvs.h"
@@ -64,8 +59,6 @@ extern "C" {
 #include "s12_i2c.h"
 #include "sunrise_i2c.h"
 
-// NOTE: Temporary constants
-#define NO_INACTIVE_NO_SLEEP 1
 #define TRACKING_DISPLAY_SLEEP 0
 
 enum class State {
@@ -78,21 +71,6 @@ enum class State {
 struct Scd4xTest {
   bool initialized = false;
 };
-
-RTC_DATA_ATTR static State RTC_LAST_STATE = State::Idle;
-RTC_DATA_ATTR static uint32_t RTC_TRACKING_SESSION_ID = 0;
-RTC_DATA_ATTR static uint32_t RTC_TRACKING_SLEEP_INTERVAL_S = GO_TRACKING_SLEEP_INTERVAL_S;
-
-static bool is_valid_rtc_state(State s) {
-  switch (s) {
-  case State::Idle:
-  case State::Inactive:
-  case State::Tracking:
-  case State::Shutdown:
-    return true;
-  }
-  return false;
-}
 
 struct Inputs {
   bool button_short = false;
@@ -961,42 +939,6 @@ static std::string buildSerialNumber() {
   return sn;
 }
 
-static void initConsole() {
-  fflush(stdout);
-  fsync(fileno(stdout));
-  esp_console_deinit();
-
-  /* Minicom, screen, idf_monitor send CR when ENTER key is pressed */
-  usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
-  /* Move the caret to the beginning of the next line on '\n' */
-  usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
-
-  /* Enable blocking mode on stdin and stdout */
-  fcntl(fileno(stdout), F_SETFL, 0);
-  fcntl(fileno(stdin), F_SETFL, 0);
-
-  usb_serial_jtag_driver_config_t jtag_config = {
-      .tx_buffer_size = 256,
-      .rx_buffer_size = 256,
-  };
-
-  /* Install USB-SERIAL-JTAG driver for interrupt-driven reads and writes */
-  ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&jtag_config));
-
-  /* Tell vfs to use usb-serial-jtag driver */
-  usb_serial_jtag_vfs_use_driver();
-
-  /* Initialize the console */
-  esp_console_config_t console_config = {};
-  console_config.max_cmdline_length = CONSOLE_MAX_CMDLINE_LENGTH;
-  console_config.max_cmdline_args = CONSOLE_MAX_CMDLINE_ARGS;
-#if CONFIG_LOG_COLORS
-  console_config.hint_color = atoi(LOG_COLOR_CYAN);
-#endif
-  console_config.hint_bold = 0;
-  ESP_ERROR_CHECK(esp_console_init(&console_config));
-}
-
 class GoController {
 public:
   GoController(ButtonService *buttons, QueueHandle_t input_queue, PMSensor *pm_sensor,
@@ -1750,15 +1692,11 @@ private:
     if (ble_->take_pending_tracking_sleep_interval_s(&s)) {
       if (s != 0) {
         tracking_sleep_interval_s_ = s;
-        RTC_TRACKING_SLEEP_INTERVAL_S = s;
         ESP_LOGI(GO_TAG, "config trackingSleepS=%" PRIu32, (uint32_t)s);
         ble_status_dirty_ = true;
-
-#if NO_INACTIVE_NO_SLEEP == 1
         if (_state == State::Tracking && _tracking_next_cycle_ms != 0) {
           _tracking_next_cycle_ms = now_ms() + tracking_sleep_interval_s_ * 1000U;
         }
-#endif
       }
     }
 
@@ -1829,13 +1767,6 @@ private:
       ESP_LOGW(GO_TAG, "BLE tracking stop ignored: state=%s", state_name(_state));
       return;
     }
-
-#if NO_INACTIVE_NO_SLEEP == 1
-    // In dev mode we don't reboot between modes, but TRACKING deep-sleeps the panel after
-    // full_refresh(). Ensure we wake and restore basemap prerequisites before switching to
-    // IDLE (which uses partial refresh).
-    _dashboard_update_status_only_();
-#endif
 
     _transition(State::Idle);
   }
@@ -2060,7 +1991,7 @@ private:
   }
 
   void _init(void) {
-    tracking_session_id_ = RTC_TRACKING_SESSION_ID;
+    tracking_session_id_ = 0;
     _serial_number = buildSerialNumber();
     ui_settings_ = default_ui_settings();
     (void)load_ui_settings(&ui_settings_);
@@ -2081,12 +2012,6 @@ private:
     last_ui_interaction_ms_ = now_ms();
     dash_values_ = dashboard::Values{};
 
-    tracking_sleep_interval_s_ = RTC_TRACKING_SLEEP_INTERVAL_S;
-    if (tracking_sleep_interval_s_ == 0) {
-      tracking_sleep_interval_s_ = GO_TRACKING_SLEEP_INTERVAL_S;
-      RTC_TRACKING_SLEEP_INTERVAL_S = tracking_sleep_interval_s_;
-    }
-
     ble_device_name_.clear();
     if (!_serial_number.empty()) {
       ble_device_name_ = std::string("AirGradientGo-") + _serial_number;
@@ -2094,41 +2019,16 @@ private:
       ble_device_name_ = "AirGradientGo";
     }
 
-    State last = RTC_LAST_STATE;
-    if (!is_valid_rtc_state(last)) {
-      last = State::Idle;
-    }
-
-    const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-
-    State initial = State::Idle;
-    if (cause == ESP_SLEEP_WAKEUP_EXT1) {
-      initial = State::Idle;
-    } else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
-      if (last == State::Tracking) {
-        initial = State::Tracking;
-      } else {
-        ESP_LOGI(GO_TAG, "Tracking stopped");
-        initial = State::Idle;
-      }
-    } else {
-      initial = State::Idle;
-    }
-
-    ESP_LOGI(GO_TAG, "wake cause=%d last=%s initial=%s", (int)cause, state_name(last),
-             state_name(initial));
-
     if (ble_ != nullptr && ui_settings_.mode == DeviceModeSetting::Portable) {
       (void)ble_->start(ble_device_name_.c_str());
     }
-    _transition(initial);
+    _transition(State::Idle);
   }
 
   void _start_new_tracking_session(void) {
     static constexpr uint32_t MIN_ID = 10000;
     static constexpr uint32_t SPAN = 90000;
     const uint32_t new_id = (esp_random() % SPAN) + MIN_ID;
-    RTC_TRACKING_SESSION_ID = new_id;
     tracking_session_id_ = new_id;
     ESP_LOGI(GO_TAG, "tracking session id=%05" PRIu32, tracking_session_id_);
   }
@@ -2824,20 +2724,6 @@ private:
       return;
     }
 
-#if NO_INACTIVE_NO_SLEEP == 0
-    if (in.button_short) {
-      _transition(State::Inactive);
-      return;
-    }
-
-    // Auto-inactive after timeout
-    const uint32_t inactive_elapsed_ms = now_ms() - _state_enter_ms;
-    if (inactive_elapsed_ms >= (uint32_t)GO_IDLE_INACTIVE_TIMEOUT_MS) {
-      _transition(State::Inactive);
-      return;
-    }
-#endif
-
     // Periodic measurement + display.
     if (_last_idle_measure_ms == 0) {
       _last_idle_measure_ms = now_ms();
@@ -3123,10 +3009,8 @@ private:
   }
 
   void _state_inactive(const Inputs &in) {
-    // INACTIVE: deep sleep until physical button is pressed.
-    // Note: deep sleep resets the chip; wake handling/persistence comes later.
     (void)in;
-    _inactive_enter_deep_sleep();
+    _transition(State::Idle);
   }
 
   void _state_tracking(const Inputs &in) {
@@ -3139,7 +3023,6 @@ private:
       return;
     }
 
-#if NO_INACTIVE_NO_SLEEP == 1
     if (_tracking_next_cycle_ms != 0) {
       const uint32_t now = now_ms();
       // Handle wraparound safely via signed delta.
@@ -3148,7 +3031,6 @@ private:
       }
       _tracking_next_cycle_ms = 0;
     }
-#endif
 
     if (!_tracking_started) {
       _tracking_started = true;
@@ -3184,14 +3066,6 @@ private:
     // Ensure we have time to complete slow steps.
     reset_ext_watchdog();
     last_wdt_reset_ms_ = now_ms();
-
-    // Stop button processing/interrupts so we don't fight I2C while shutting down.
-    if (buttons_ != nullptr) {
-      const esp_err_t err = buttons_->pre_light_sleep();
-      if (err != ESP_OK) {
-        ESP_LOGW(GO_TAG, "shutdown: buttons pre_light_sleep failed: %s", esp_err_to_name(err));
-      }
-    }
 
     // Flush queued storage writes.
     if (storage_ != nullptr && storage_->is_ready()) {
@@ -3238,8 +3112,9 @@ private:
       }
     }
 
-    // waiting an actual shutdown from BMS
-    esp_deep_sleep_start();
+    for (;;) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }
   }
 
   // ----- Placeholder implementations (fill in later) -----
@@ -3495,29 +3370,6 @@ private:
 
       _ble_notify(rec, gps_ok, d);
     }
-  }
-
-  void _inactive_enter_deep_sleep(void) {
-    // TODO: configure wakeup source (physical button) and enter deep sleep.
-    if (dash_ != nullptr) {
-      dash_->deep_sleep();
-    }
-
-    ESP_LOGI(GO_TAG, "inactive: entering deep sleep (stub)");
-    esp_err_t err = ESP_OK;
-    if (buttons_ != nullptr) {
-      err = buttons_->enable_deep_sleep_wakeup();
-    } else {
-      ESP_LOGE(GO_TAG, "deep sleep wake config failed: buttons not initialized");
-      return;
-    }
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "deep sleep wake config failed: %s", esp_err_to_name(err));
-    }
-
-    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-    RTC_LAST_STATE = State::Inactive;
-    esp_deep_sleep_start();
   }
 
   void _tracking_begin(void) {
@@ -3801,13 +3653,6 @@ private:
       return;
     }
 
-#if NO_INACTIVE_NO_SLEEP == 0
-    err = storage_->flush_sync(to);
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "storage flush failed: %s", esp_err_to_name(err));
-      return;
-    }
-#endif
   }
 
   void _tracking_end(void) {
@@ -3816,33 +3661,9 @@ private:
   }
 
   void _tracking_enter_sleep(void) {
-
-#if NO_INACTIVE_NO_SLEEP == 1
     _tracking_next_cycle_ms = now_ms() + tracking_sleep_interval_s_ * 1000U;
     _tracking_started = false;
     return;
-#endif // NO_INACTIVE_NO_SLEEP == 1
-
-    ESP_LOGI(GO_TAG, "tracking: entering deep sleep (stub)");
-
-    esp_err_t err = ESP_OK;
-    if (buttons_ != nullptr) {
-      err = buttons_->enable_deep_sleep_wakeup();
-    } else {
-      ESP_LOGE(GO_TAG, "deep sleep wake config failed: buttons not initialized");
-      return;
-    }
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "deep sleep wake config failed: %s", esp_err_to_name(err));
-    }
-
-    err = esp_sleep_enable_timer_wakeup((uint64_t)tracking_sleep_interval_s_ * 1000000ULL);
-    if (err != ESP_OK) {
-      ESP_LOGW(GO_TAG, "timer wake config failed: %s", esp_err_to_name(err));
-    }
-
-    RTC_LAST_STATE = State::Tracking;
-    esp_deep_sleep_start();
   }
 };
 
@@ -3860,12 +3681,6 @@ static void on_button_event(void *arg, esp_event_base_t base, int32_t id, void *
 
 extern "C" void app_main(void) {
   vTaskDelay(pdMS_TO_TICKS(100));
-  // Re-initialize console after deepsleep
-  esp_sleep_wakeup_cause_t wakeUpReason = esp_sleep_get_wakeup_cause();
-  if (wakeUpReason != ESP_SLEEP_WAKEUP_UNDEFINED) {
-    initConsole();
-    vTaskDelay(pdMS_TO_TICKS(1000));
-  }
 
   esp_log_level_set(GO_TAG, ESP_LOG_INFO);
   sleep_ms(GO_BOOT_DELAY_MS);

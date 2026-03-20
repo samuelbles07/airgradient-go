@@ -59,8 +59,6 @@ static void resetExtWatchdog();
 static void log_gps_data(const GPSService::Data &d);
 static void dump_all_storage_records(NandStorageService *storage);
 static std::string buildSerialNumber();
-// static void prepare_light_sleep(i2c_master_bus_handle_t bus_handle);
-// static void post_light_sleep(i2c_master_bus_handle_t bus_handle);
 static int32_t deg_to_e7(double deg) { return (int32_t)llround(deg * 10000000.0); }
 static uint16_t pm25_to_x10(float ugm3) {
   if (!(ugm3 >= 0.0f)) { // catches NaN too
